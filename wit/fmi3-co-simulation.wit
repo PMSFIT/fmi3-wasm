@@ -1,0 +1,90 @@
+
+package fmi:fmi3@3.0.0;
+
+interface co-simulation {
+  use types.{value-reference, status};
+  use common.{instance};
+
+  /// Result of a fmi3DoStep call.
+  record do-step-result {
+    /// The FMU completed the step up to (at least) the requested time.
+    /// When early-return is enabled this may be less than end-point.
+    last-successful-time: f64,
+    /// True if the FMU returned early (canReturnEarlyAfterIntermediateUpdate).
+    event-handling-needed: bool,
+    /// True if the FMU requests termination.
+    terminate-simulation:  bool,
+    /// True if the step was entirely discarded and must be retried.
+    early-return:          bool,
+  }
+
+  resource co-simulation-instance {
+
+    // ── Construction ──────────────────────────────────────────────────────────
+
+    /// Wrap a common `instance` (previously created with
+    /// instance::instantiate-co-simulation) into a co-simulation-instance.
+    from-instance: static func(inst: instance) -> co-simulation-instance;
+
+    // ── Input derivatives ─────────────────────────────────────────────────────
+
+    /// Provide higher-order input derivatives to the FMU before fmi3DoStep.
+    ///
+    /// FMI C: fmi3Status fmi3SetInputDerivatives(
+    ///     fmi3Instance instance,
+    ///     const fmi3ValueReference vrs[], size_t nVRs,
+    ///     const fmi3UInt32 orders[], size_t nOrders,
+    ///     const fmi3Float64 values[], size_t nValues);
+    ///
+    /// Mapping: (vr, order) pairs are interleaved in a list of tuples.
+    set-input-derivatives: func(
+      requests: list<tuple<value-reference, u32>>,
+      values:   list<f64>,
+    ) -> status;
+
+    // ── Output derivatives ────────────────────────────────────────────────────
+
+    /// Retrieve higher-order output derivatives after fmi3DoStep.
+    ///
+    /// FMI C: fmi3Status fmi3GetOutputDerivatives(
+    ///     fmi3Instance instance,
+    ///     const fmi3ValueReference vrs[], size_t nVRs,
+    ///     const fmi3UInt32 orders[], size_t nOrders,
+    ///     fmi3Float64 values[], size_t nValues);
+    get-output-derivatives: func(
+      requests: list<tuple<value-reference, u32>>,
+    ) -> result<list<f64>, status>;
+
+    // ── Step ──────────────────────────────────────────────────────────────────
+
+    /// Advance the simulation by one communication step.
+    ///
+    /// FMI C: fmi3Status fmi3DoStep(
+    ///     fmi3Instance instance,
+    ///     fmi3Float64 currentCommunicationPoint,
+    ///     fmi3Float64 communicationStepSize,
+    ///     fmi3Boolean noSetFMUStatePriorToCurrentPoint,
+    ///     fmi3Boolean* eventHandlingNeeded,
+    ///     fmi3Boolean* terminateSimulation,
+    ///     fmi3Boolean* earlyReturn,
+    ///     fmi3Float64* lastSuccessfulTime);
+    ///
+    /// Mapping notes:
+    ///   • Output parameters aggregated into do-step-result.
+    ///   • status::discard signals the step must be retried with a smaller
+    ///     step size; in that case the returned do-step-result fields indicate
+    ///     why and where the FMU stopped.
+    do-step: func(
+      current-communication-point:            f64,
+      communication-step-size:                f64,
+      no-set-fmu-state-prior-to-current-point: bool,
+    ) -> result<do-step-result, status>;
+
+    // ── Step-mode transition (CS with event mode) ─────────────────────────────
+
+    /// Enter Step Mode from Event Mode (used when event-mode-used = true).
+    ///
+    /// FMI C: fmi3Status fmi3EnterStepMode(fmi3Instance instance);
+    enter-step-mode: func() -> status;
+  }
+}

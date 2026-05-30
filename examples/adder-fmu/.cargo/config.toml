@@ -1,0 +1,3 @@
+[build]
+# Target the WASI Preview 2 (Component Model) tier.
+target = "wasm32-wasip2"

@@ -1,0 +1,38 @@
+
+package fmi:fmi3@3.0.0;
+
+interface scheduled-execution {
+  use types.{value-reference, status};
+  use common.{instance};
+
+  resource scheduled-execution-instance {
+
+    // ── Construction ──────────────────────────────────────────────────────────
+
+    /// Wrap a common `instance` (previously created with
+    /// instance::instantiate-scheduled-execution) into a
+    /// scheduled-execution-instance.
+    from-instance: static func(inst: instance) -> scheduled-execution-instance;
+
+    // ── Partition activation ──────────────────────────────────────────────────
+
+    /// Activate a single model partition identified by its clock value reference.
+    ///
+    /// FMI C: fmi3Status fmi3ActivateModelPartition(
+    ///     fmi3Instance instance,
+    ///     fmi3ValueReference clockReference,
+    ///     fmi3Float64 activationTime);
+    ///
+    /// Mapping notes:
+    ///   • activationTime is the absolute simulation time at which the
+    ///     partition is being activated (corresponds to the clock tick time).
+    ///   • The master is responsible for acquiring the preemption lock before
+    ///     calling this function and releasing it afterwards (via the
+    ///     lock-preemption / unlock-preemption callbacks in the `callbacks`
+    ///     imported interface).
+    activate-model-partition: func(
+      clock-reference: value-reference,
+      activation-time: f64,
+    ) -> status;
+  }
+}

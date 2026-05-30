@@ -1,0 +1,13 @@
+[package]
+name    = "adder-fmu"
+version = "0.1.0"
+edition = "2021"
+description = "Example FMI 3.0 Co-Simulation FMU: sum of two Float64 inputs"
+
+[lib]
+# Compile as a Wasm component shared library.
+crate-type = ["cdylib"]
+
+[dependencies]
+# WIT binding generator – generates Rust glue from the ../../../wit package.
+wit-bindgen = "0.43"

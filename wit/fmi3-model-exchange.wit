@@ -1,0 +1,132 @@
+
+package fmi:fmi3@3.0.0;
+
+interface model-exchange {
+  use types.{value-reference, status, discrete-states-info};
+  use common.{instance};
+
+  /// Result of fmi3CompletedIntegratorStep, indicating whether the master
+  /// should trigger event processing or discard the step.
+  record completed-step-result {
+    /// The FMU requests entering Event Mode.
+    enter-event-mode:   bool,
+    /// The FMU requests step termination.
+    terminate-simulation: bool,
+  }
+
+  resource model-exchange-instance {
+
+    // ── Construction ──────────────────────────────────────────────────────────
+
+    /// Wrap a common `instance` (previously created with
+    /// instance::instantiate-model-exchange) into a model-exchange-instance.
+    ///
+    /// This two-step pattern mirrors how the C API uses the same
+    /// fmi3Instance type for all interface kinds while the ME-specific
+    /// functions are available only after ME instantiation.
+    from-instance: static func(inst: instance) -> model-exchange-instance;
+
+    // ── Mode transitions ──────────────────────────────────────────────────────
+
+    /// Transition from Initialisation / Event Mode into Continuous-Time Mode.
+    ///
+    /// FMI C: fmi3Status fmi3EnterContinuousTimeMode(fmi3Instance instance);
+    enter-continuous-time-mode: func() -> status;
+
+    /// Transition back into Step Mode (FMI 3.0 adds an explicit step mode for
+    /// ME to allow output derivatives to be queried between steps).
+    ///
+    /// FMI C: fmi3Status fmi3EnterStepMode(fmi3Instance instance);
+    enter-step-mode: func() -> status;
+
+    // ── Time & state setters ──────────────────────────────────────────────────
+
+    /// Inform the FMU of the current simulation time.
+    ///
+    /// FMI C: fmi3Status fmi3SetTime(fmi3Instance instance, fmi3Float64 time);
+    set-time: func(time: f64) -> status;
+
+    /// Set the continuous state vector.
+    ///
+    /// FMI C: fmi3Status fmi3SetContinuousStates(
+    ///     fmi3Instance instance,
+    ///     const fmi3Float64 continuousStates[], size_t nContinuousStates);
+    set-continuous-states: func(continuous-states: list<f64>) -> status;
+
+    // ── Derivative & event-indicator getters ─────────────────────────────────
+
+    /// Retrieve the continuous-state derivatives ẋ = f(t, x, u).
+    ///
+    /// FMI C: fmi3Status fmi3GetContinuousStateDerivatives(
+    ///     fmi3Instance instance,
+    ///     fmi3Float64 derivatives[], size_t nContinuousStates);
+    get-continuous-state-derivatives: func() -> result<list<f64>, status>;
+
+    /// Retrieve zero-crossing (event-indicator) functions.
+    ///
+    /// FMI C: fmi3Status fmi3GetEventIndicators(
+    ///     fmi3Instance instance,
+    ///     fmi3Float64 eventIndicators[], size_t nEventIndicators);
+    get-event-indicators: func() -> result<list<f64>, status>;
+
+    /// Retrieve the current continuous state vector (read-back after a
+    /// successful integrator step).
+    ///
+    /// FMI C: fmi3Status fmi3GetContinuousStates(
+    ///     fmi3Instance instance,
+    ///     fmi3Float64 continuousStates[], size_t nContinuousStates);
+    get-continuous-states: func() -> result<list<f64>, status>;
+
+    /// Retrieve the nominal values of the continuous states (used for scaling
+    /// in the integrator).
+    ///
+    /// FMI C: fmi3Status fmi3GetNominalsOfContinuousStates(
+    ///     fmi3Instance instance,
+    ///     fmi3Float64 nominals[], size_t nContinuousStates);
+    get-nominals-of-continuous-states: func() -> result<list<f64>, status>;
+
+    /// Query how many event indicators the FMU has.
+    ///
+    /// FMI C: fmi3Status fmi3GetNumberOfEventIndicators(
+    ///     fmi3Instance instance, size_t* nEventIndicators);
+    get-number-of-event-indicators: func() -> result<u64, status>;
+
+    /// Query how many continuous states the FMU has.
+    ///
+    /// FMI C: fmi3Status fmi3GetNumberOfContinuousStates(
+    ///     fmi3Instance instance, size_t* nContinuousStates);
+    get-number-of-continuous-states: func() -> result<u64, status>;
+
+    // ── Step completion ───────────────────────────────────────────────────────
+
+    /// Notify the FMU that the master has successfully completed an integrator
+    /// step and query whether event processing is needed.
+    ///
+    /// FMI C: fmi3Status fmi3CompletedIntegratorStep(
+    ///     fmi3Instance instance,
+    ///     fmi3Boolean noSetFMUStatePriorToCurrentPoint,
+    ///     fmi3Boolean* enterEventMode,
+    ///     fmi3Boolean* terminateSimulation);
+    ///
+    /// Mapping: output booleans are aggregated into completed-step-result.
+    completed-integrator-step: func(
+      no-set-fmu-state-prior-to-current-point: bool,
+    ) -> result<completed-step-result, status>;
+
+    // ── Output derivatives ────────────────────────────────────────────────────
+
+    /// Retrieve higher-order output derivatives (shared with Co-Simulation).
+    ///
+    /// FMI C: fmi3Status fmi3GetOutputDerivatives(
+    ///     fmi3Instance instance,
+    ///     const fmi3ValueReference vrs[], size_t nVRs,
+    ///     const fmi3UInt32 orders[], size_t nOrders,
+    ///     fmi3Float64 values[], size_t nValues);
+    ///
+    /// Mapping: (vr, order) pairs are interleaved in a list of tuples to
+    ///          avoid two parallel lists.
+    get-output-derivatives: func(
+      requests: list<tuple<value-reference, u32>>,
+    ) -> result<list<f64>, status>;
+  }
+}
