@@ -50,7 +50,8 @@ use std::cell::RefCell;
 
 use exports::fmi::fmi3::{
     co_simulation::{DoStepResult, GuestCoSimulationInstance},
-    common::GuestInstance,
+    common::{Guest, GuestInstance, Status, DiscreteStatesInfo, VariableDependency, IntervalQualifier, IntervalFraction},
+    types::DependencyKind,
 };
 
 // ---------------------------------------------------------------------------
@@ -141,12 +142,6 @@ impl GuestInstance for AdderInstance {
     ) -> Option<exports::fmi::fmi3::common::Instance> {
         // This FMU only supports Co-Simulation.
         None
-    }
-
-    // ── Version ─────────────────────────────────────────────────────────────
-
-    fn get_version() -> String {
-        "3.0".to_string()
     }
 
     // ── Debug logging ────────────────────────────────────────────────────────
@@ -479,6 +474,13 @@ struct AdderFmu;
 impl Guest for AdderFmu {
     type Instance             = AdderInstance;
     type CoSimulationInstance = AdderCoSimInstance;
+    
+    // ── Version ─────────────────────────────────────────────────────────────
+
+    fn get_version() -> String {
+        "3.0".to_string()
+    }
+
 }
 
 export!(AdderFmu);
