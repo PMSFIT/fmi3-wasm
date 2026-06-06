@@ -1,5 +1,7 @@
 # FMI 3.0 → WebAssembly Component Model Mapping
 
+[![Build](https://github.com/PMSFIT/fmi3-wasm/actions/workflows/build.yml/badge.svg)](https://github.com/PMSFIT/fmi3-wasm/actions/workflows/build.yml)
+
 WIT definitions that map the [FMI 3.0](https://svn.modelica.org/fmi/branches/public/specifications/v3.0/) C API to the [WebAssembly Component Model](https://component-model.bytecodealliance.org/) interface description language (WIT).
 
 ## File layout
