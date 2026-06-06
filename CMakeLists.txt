@@ -133,6 +133,48 @@ if(CARGO_EXECUTABLE)
     )
 
     # -----------------------------------------------------------------------
+    # Package adder-fmu as a proper FMU archive (.fmu = zip)
+    #
+    # Layout inside the archive:
+    #   modelDescription.xml
+    #   binaries/wasm32-wasip2/adder_fmu.wasm
+    # -----------------------------------------------------------------------
+    set(ADDER_FMU_ARCHIVE  "${CMAKE_BINARY_DIR}/adder-fmu.fmu")
+    set(ADDER_FMU_STAGING  "${CMAKE_BINARY_DIR}/adder-fmu-staging")
+    set(ADDER_FMU_MODEL_DESC "${ADDER_FMU_DIR}/modelDescription.xml")
+
+    add_custom_command(
+        OUTPUT "${ADDER_FMU_ARCHIVE}"
+        # (Re-)create a clean staging tree
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "${ADDER_FMU_STAGING}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "${ADDER_FMU_STAGING}/binaries/wasm32-wasip2"
+        # Populate the staging tree
+        COMMAND ${CMAKE_COMMAND} -E copy
+                "${ADDER_FMU_MODEL_DESC}"
+                "${ADDER_FMU_STAGING}/modelDescription.xml"
+        COMMAND ${CMAKE_COMMAND} -E copy
+                "${ADDER_FMU_WASM}"
+                "${ADDER_FMU_STAGING}/binaries/wasm32-wasip2/adder_fmu.wasm"
+        # Zip the staging tree into <build>/adder-fmu.fmu
+        # cmake -E chdir changes directory before running the nested command,
+        # so relative paths in the archive match the desired layout.
+        COMMAND ${CMAKE_COMMAND} -E chdir "${ADDER_FMU_STAGING}"
+                ${CMAKE_COMMAND} -E tar cf "${ADDER_FMU_ARCHIVE}" --format=zip
+                -- modelDescription.xml binaries
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+        DEPENDS
+            adder-fmu
+            "${ADDER_FMU_MODEL_DESC}"
+        COMMENT "Packaging adder-fmu FMU archive (adder-fmu.fmu)..."
+        VERBATIM
+    )
+
+    add_custom_target(adder-fmu-archive
+        DEPENDS "${ADDER_FMU_ARCHIVE}"
+    )
+
+    # -----------------------------------------------------------------------
     # Example host runner: adder-fmu-runner
     #
     # Runs the adder FMU with wasmtime from t = 0.0 to 5.0 in 0.1 s steps,
@@ -142,21 +184,21 @@ if(CARGO_EXECUTABLE)
 
     add_custom_target(adder-fmu-runner
         COMMAND ${CARGO_EXECUTABLE} run --manifest-path "${ADDER_FMU_RUNNER_DIR}/Cargo.toml"
-                -- "${ADDER_FMU_WASM}"
+                -- "${ADDER_FMU_ARCHIVE}"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
         DEPENDS
-            adder-fmu
+            adder-fmu-archive
             "${ADDER_FMU_RUNNER_DIR}/Cargo.toml"
             "${ADDER_FMU_RUNNER_DIR}/src/main.rs"
             ${WIT_FILES}
-        COMMENT "Running adder-fmu-runner against adder-fmu component..."
+        COMMENT "Running adder-fmu-runner against adder-fmu.fmu..."
         VERBATIM
     )
 
     add_test(
         NAME adder-fmu-runner
         COMMAND ${CARGO_EXECUTABLE} run --manifest-path "${ADDER_FMU_RUNNER_DIR}/Cargo.toml"
-                -- "${ADDER_FMU_WASM}"
+                -- "${ADDER_FMU_ARCHIVE}"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     )
     set_tests_properties(adder-fmu-runner

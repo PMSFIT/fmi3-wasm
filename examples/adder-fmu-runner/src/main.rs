@@ -36,10 +36,14 @@
 //! ## Usage
 //!
 //! ```text
-//! adder-fmu-runner <path/to/adder_fmu.wasm>
+//! adder-fmu-runner <path/to/adder-fmu.fmu>
 //! ```
 
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use anyhow::{anyhow, bail, Context, Result};
+use tempfile::TempDir;
 use wasmtime::component::{Component, Linker, ResourceAny};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -124,13 +128,60 @@ const VR_INPUT_B: u32 = 1;
 const VR_SUM:     u32 = 2;
 
 // ---------------------------------------------------------------------------
+// FMU archive helpers
+// ---------------------------------------------------------------------------
+
+/// Extract a `.fmu` archive (which is a zip file) into a fresh temporary
+/// directory and return the handle.  The caller must keep the `TempDir` alive
+/// for as long as the extracted files are needed; dropping it removes the
+/// directory automatically.
+fn extract_fmu(fmu_path: &str) -> Result<TempDir> {
+    let file = fs::File::open(fmu_path)
+        .with_context(|| format!("Cannot open FMU archive '{fmu_path}'"))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .context("Not a valid zip / FMU archive")?;
+    let tmp = TempDir::new().context("Failed to create temporary directory")?;
+    archive
+        .extract(tmp.path())
+        .context("Failed to extract FMU archive")?;
+    Ok(tmp)
+}
+
+/// Locate the first `.wasm` file inside `<fmu_dir>/binaries/wasm32-wasip2/`.
+fn find_wasm_in_fmu(fmu_dir: &Path) -> Result<PathBuf> {
+    let wasm_dir = fmu_dir.join("binaries").join("wasm32-wasip2");
+    for entry in fs::read_dir(&wasm_dir)
+        .with_context(|| format!("Missing directory '{}'", wasm_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("wasm") {
+            return Ok(path);
+        }
+    }
+    bail!("No .wasm file found in '{}'", wasm_dir.display())
+}
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 
 fn main() -> Result<()> {
-    let wasm_path = std::env::args()
+    let fmu_path = std::env::args()
         .nth(1)
-        .context("Usage: adder-fmu-runner <path/to/adder_fmu.wasm>")?;
+        .context("Usage: adder-fmu-runner <path/to/adder-fmu.fmu>")?;
+
+    // ── Extract FMU archive ────────────────────────────────────────────────
+    // The TempDir is kept alive for the duration of `main`; it is removed
+    // automatically when it goes out of scope at the end of the function.
+    let tmp_dir = extract_fmu(&fmu_path)
+        .with_context(|| format!("Failed to extract FMU archive '{fmu_path}'"))?;
+
+    let wasm_path = find_wasm_in_fmu(tmp_dir.path())
+        .with_context(|| format!("No wasm component found inside '{fmu_path}'"))?;
+
+    println!("Extracted FMU to '{}'", tmp_dir.path().display());
+    println!("Loading wasm component: '{}'", wasm_path.display());
 
     // ── Engine & component ─────────────────────────────────────────────────
     let mut cfg = Config::new();
@@ -138,7 +189,7 @@ fn main() -> Result<()> {
     let engine = Engine::new(&cfg)?;
 
     let component = Component::from_file(&engine, &wasm_path)
-        .map_err(|e| anyhow!("Failed to load component from '{wasm_path}': {e}"))?;
+        .map_err(|e| anyhow!("Failed to load component from '{}': {e}", wasm_path.display()))?;
 
     // ── Linker: WASI P2 + FMI callbacks ───────────────────────────────────
     let mut linker: Linker<HostState> = Linker::new(&engine);
@@ -287,5 +338,8 @@ fn main() -> Result<()> {
         "OK — all {n_steps} steps passed: \
          adder FMU correctly computes sum = input_a + input_b at every communication point."
     );
+
+    // tmp_dir is dropped here, removing the extracted FMU files.
+    drop(tmp_dir);
     Ok(())
 }
