@@ -131,4 +131,48 @@ if(CARGO_EXECUTABLE)
     set_tests_properties(adder-fmu-wasm-validation
         PROPERTIES DEPENDS wit-validation
     )
+
+    # -----------------------------------------------------------------------
+    # Example host runner: adder-fmu-runner
+    #
+    # Runs the adder FMU with wasmtime from t = 0.0 to 5.0 in 0.1 s steps,
+    # checking that sum = input_a + input_b at each communication point.
+    # -----------------------------------------------------------------------
+    set(ADDER_FMU_RUNNER_DIR  "${CMAKE_SOURCE_DIR}/examples/adder-fmu-runner")
+
+    add_custom_target(adder-fmu-runner
+        COMMAND ${CARGO_EXECUTABLE} run --manifest-path "${ADDER_FMU_RUNNER_DIR}/Cargo.toml"
+                -- "${ADDER_FMU_WASM}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        DEPENDS
+            adder-fmu
+            "${ADDER_FMU_RUNNER_DIR}/Cargo.toml"
+            "${ADDER_FMU_RUNNER_DIR}/src/main.rs"
+            ${WIT_FILES}
+        COMMENT "Running adder-fmu-runner against adder-fmu component..."
+        VERBATIM
+    )
+
+    add_test(
+        NAME adder-fmu-runner
+        COMMAND ${CARGO_EXECUTABLE} run --manifest-path "${ADDER_FMU_RUNNER_DIR}/Cargo.toml"
+                -- "${ADDER_FMU_WASM}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(adder-fmu-runner
+        PROPERTIES DEPENDS adder-fmu-wasm-validation
+    )
+
+    # -----------------------------------------------------------------------
+    # Top-level convenience target for all FMU examples and runners.
+    #
+    # Build/run with:
+    #   cmake --build <build-dir> --target run-all-examples
+    # -----------------------------------------------------------------------
+    add_custom_target(run-all-examples
+        DEPENDS
+            validate-wit
+            validate-adder-fmu
+            adder-fmu-runner
+    )
 endif()

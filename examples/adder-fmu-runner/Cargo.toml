@@ -1,0 +1,15 @@
+[package]
+name    = "adder-fmu-runner"
+version = "0.1.0"
+edition = "2021"
+description = "Host runner that exercises the adder-fmu Wasm component via wasmtime"
+
+[[bin]]
+name = "adder-fmu-runner"
+path = "src/main.rs"
+
+[dependencies]
+# Component-model host runtime.
+wasmtime      = { version = "45", features = ["component-model"] }
+wasmtime-wasi = "45"
+anyhow        = "1"
