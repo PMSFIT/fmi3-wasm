@@ -16,11 +16,15 @@
 #include <wasmtime.h>
 
 static const char *WORLD_COSIM = "fmi:fmi3/co-simulation@3.0.0";
+static const char *TARGET_PLATFORM = "wasm32-wasip2";
 
-static const uint32_t VR_TIME = 0;
-static const uint32_t VR_INPUT_A = 1;
-static const uint32_t VR_INPUT_B = 2;
-static const uint32_t VR_SUM = 3;
+typedef struct {
+    char model_identifier[256];
+    uint32_t vr_time;
+    uint32_t vr_input_a;
+    uint32_t vr_input_b;
+    uint32_t vr_sum;
+} fmu_metadata_t;
 
 static void print_usage(const char *argv0) {
     fprintf(stderr, "Usage: %s <path/to/adder-fmu.fmu>\n", argv0);
@@ -61,6 +65,221 @@ static bool run_command(char *const argv[]) {
     return true;
 }
 
+static bool read_text_file(const char *path, char **data_out) {
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) {
+        perror("fopen");
+        return false;
+    }
+
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return false;
+    }
+
+    long len = ftell(f);
+    if (len < 0) {
+        fclose(f);
+        return false;
+    }
+
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return false;
+    }
+
+    char *buf = (char *)malloc((size_t)len + 1);
+    if (buf == NULL) {
+        fclose(f);
+        return false;
+    }
+
+    if (fread(buf, 1, (size_t)len, f) != (size_t)len) {
+        fclose(f);
+        free(buf);
+        return false;
+    }
+
+    buf[len] = '\0';
+    fclose(f);
+    *data_out = buf;
+    return true;
+}
+
+static const char *find_tag_end(const char *tag_start) {
+    return strchr(tag_start, '>');
+}
+
+static bool parse_xml_attribute(const char *tag_start,
+                                const char *tag_end,
+                                const char *attr_name,
+                                char *value_out,
+                                size_t value_out_len) {
+    size_t attr_len = strlen(attr_name);
+    const char *attr = strstr(tag_start, attr_name);
+    if (attr == NULL || attr >= tag_end) {
+        return false;
+    }
+
+    const char *scan = attr + attr_len;
+    while (scan < tag_end && (*scan == ' ' || *scan == '\t' || *scan == '\r' || *scan == '\n')) {
+        ++scan;
+    }
+    if (scan >= tag_end || *scan != '=') {
+        return false;
+    }
+
+    ++scan;
+    while (scan < tag_end && (*scan == ' ' || *scan == '\t' || *scan == '\r' || *scan == '\n')) {
+        ++scan;
+    }
+    if (scan >= tag_end || (*scan != '"' && *scan != '\'')) {
+        return false;
+    }
+
+    char quote = *scan++;
+    const char *value_start = scan;
+    const char *value_end = memchr(value_start, quote, (size_t)(tag_end - value_start));
+    if (value_end == NULL) {
+        return false;
+    }
+
+    size_t value_len = (size_t)(value_end - value_start);
+    if (value_len + 1 > value_out_len) {
+        return false;
+    }
+
+    memcpy(value_out, value_start, value_len);
+    value_out[value_len] = '\0';
+    return true;
+}
+
+static bool parse_u32_attribute(const char *tag_start,
+                                const char *tag_end,
+                                const char *attr_name,
+                                uint32_t *value_out) {
+    char buffer[32];
+    if (!parse_xml_attribute(tag_start, tag_end, attr_name, buffer, sizeof(buffer))) {
+        return false;
+    }
+
+    char *end = NULL;
+    unsigned long value = strtoul(buffer, &end, 10);
+    if (end == buffer || *end != '\0' || value > UINT32_MAX) {
+        return false;
+    }
+
+    *value_out = (uint32_t)value;
+    return true;
+}
+
+static bool parse_model_description(const char *fmu_dir, fmu_metadata_t *metadata_out) {
+    char model_description_path[4096];
+    snprintf(model_description_path, sizeof(model_description_path), "%s/modelDescription.xml", fmu_dir);
+
+    char *xml = NULL;
+    if (!read_text_file(model_description_path, &xml)) {
+        fprintf(stderr, "Failed to read %s\n", model_description_path);
+        return false;
+    }
+
+    const char *cosim_tag = strstr(xml, "<CoSimulation");
+    if (cosim_tag == NULL) {
+        fprintf(stderr, "Missing CoSimulation element in modelDescription.xml\n");
+        free(xml);
+        return false;
+    }
+    const char *cosim_end = find_tag_end(cosim_tag);
+    if (cosim_end == NULL) {
+        fprintf(stderr, "Malformed CoSimulation element in modelDescription.xml\n");
+        free(xml);
+        return false;
+    }
+    if (!parse_xml_attribute(cosim_tag, cosim_end, "modelIdentifier", metadata_out->model_identifier,
+                             sizeof(metadata_out->model_identifier))) {
+        fprintf(stderr, "Missing CoSimulation modelIdentifier in modelDescription.xml\n");
+        free(xml);
+        return false;
+    }
+
+    const char *vars_start = strstr(xml, "<ModelVariables");
+    const char *vars_end = strstr(xml, "</ModelVariables>");
+    if (vars_start == NULL || vars_end == NULL || vars_end <= vars_start) {
+        fprintf(stderr, "Missing ModelVariables element in modelDescription.xml\n");
+        free(xml);
+        return false;
+    }
+
+    bool have_time = false;
+    bool have_input_a = false;
+    bool have_input_b = false;
+    bool have_sum = false;
+
+    const char *cursor = vars_start;
+    while ((cursor = strstr(cursor, "<Float64")) != NULL && cursor < vars_end) {
+        const char *tag_end = find_tag_end(cursor);
+        if (tag_end == NULL || tag_end > vars_end) {
+            fprintf(stderr, "Malformed Float64 variable entry in modelDescription.xml\n");
+            free(xml);
+            return false;
+        }
+
+        char name[128];
+        uint32_t value_reference = 0;
+        if (!parse_xml_attribute(cursor, tag_end, "name", name, sizeof(name)) ||
+            !parse_u32_attribute(cursor, tag_end, "valueReference", &value_reference)) {
+            fprintf(stderr, "Failed to parse Float64 variable entry in modelDescription.xml\n");
+            free(xml);
+            return false;
+        }
+
+        if (strcmp(name, "time") == 0) {
+            if (have_time) {
+                fprintf(stderr, "Duplicate variable 'time' in modelDescription.xml\n");
+                free(xml);
+                return false;
+            }
+            metadata_out->vr_time = value_reference;
+            have_time = true;
+        } else if (strcmp(name, "input_a") == 0) {
+            if (have_input_a) {
+                fprintf(stderr, "Duplicate variable 'input_a' in modelDescription.xml\n");
+                free(xml);
+                return false;
+            }
+            metadata_out->vr_input_a = value_reference;
+            have_input_a = true;
+        } else if (strcmp(name, "input_b") == 0) {
+            if (have_input_b) {
+                fprintf(stderr, "Duplicate variable 'input_b' in modelDescription.xml\n");
+                free(xml);
+                return false;
+            }
+            metadata_out->vr_input_b = value_reference;
+            have_input_b = true;
+        } else if (strcmp(name, "sum") == 0) {
+            if (have_sum) {
+                fprintf(stderr, "Duplicate variable 'sum' in modelDescription.xml\n");
+                free(xml);
+                return false;
+            }
+            metadata_out->vr_sum = value_reference;
+            have_sum = true;
+        }
+
+        cursor = tag_end + 1;
+    }
+
+    free(xml);
+
+    if (!have_time || !have_input_a || !have_input_b || !have_sum) {
+        fprintf(stderr, "Missing one or more required variables in modelDescription.xml\n");
+        return false;
+    }
+
+    return true;
+}
+
 static bool extract_fmu_to_temp(const char *fmu_path, char *temp_dir_out, size_t temp_dir_out_len) {
     const char *template_str = "/tmp/adder-fmu-c-runner-XXXXXX";
     if (strlen(template_str) + 1 > temp_dir_out_len) {
@@ -86,32 +305,32 @@ static bool extract_fmu_to_temp(const char *fmu_path, char *temp_dir_out, size_t
     return run_command(unzip_argv);
 }
 
-static bool find_wasm_in_fmu(const char *fmu_dir, char *wasm_path_out, size_t wasm_path_out_len) {
+static bool find_wasm_in_fmu(const char *fmu_dir,
+                             const fmu_metadata_t *metadata,
+                             char *wasm_path_out,
+                             size_t wasm_path_out_len) {
     char wasm_dir[4096];
-    snprintf(wasm_dir, sizeof(wasm_dir), "%s/binaries/wasm32-wasip2", fmu_dir);
+    snprintf(wasm_dir, sizeof(wasm_dir), "%s/binaries/%s", fmu_dir, TARGET_PLATFORM);
 
-    DIR *dir = opendir(wasm_dir);
-    if (dir == NULL) {
-        perror("opendir");
+    struct stat st;
+    if (stat(wasm_dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        fprintf(stderr, "Missing directory: %s\n", wasm_dir);
         return false;
     }
 
-    struct dirent *ent = NULL;
-    while ((ent = readdir(dir)) != NULL) {
-        const char *name = ent->d_name;
-        size_t n = strlen(name);
-        if (n >= 5 && strcmp(name + n - 5, ".wasm") == 0) {
-            int written = snprintf(wasm_path_out, wasm_path_out_len, "%s/%s", wasm_dir, name);
-            if (written < 0 || (size_t)written >= wasm_path_out_len) {
-                continue;
-            }
-            closedir(dir);
-            return true;
-        }
+    int written = snprintf(wasm_path_out, wasm_path_out_len, "%s/%s.wasm", wasm_dir,
+                           metadata->model_identifier);
+    if (written < 0 || (size_t)written >= wasm_path_out_len) {
+        fprintf(stderr, "Wasm path too long for modelIdentifier '%s'\n", metadata->model_identifier);
+        return false;
     }
 
-    closedir(dir);
-    return false;
+    if (access(wasm_path_out, R_OK) != 0) {
+        fprintf(stderr, "Missing wasm component: %s\n", wasm_path_out);
+        return false;
+    }
+
+    return true;
 }
 
 static bool read_binary_file(const char *path, uint8_t **data_out, size_t *len_out) {
@@ -352,14 +571,21 @@ int main(int argc, char **argv) {
     const char *fmu_path = argv[1];
     char tmp_dir[128];
     char wasm_path[4096];
+    fmu_metadata_t metadata;
+    memset(&metadata, 0, sizeof(metadata));
 
     if (!extract_fmu_to_temp(fmu_path, tmp_dir, sizeof(tmp_dir))) {
         fprintf(stderr, "Failed to extract FMU archive: %s\n", fmu_path);
         return 1;
     }
 
-    if (!find_wasm_in_fmu(tmp_dir, wasm_path, sizeof(wasm_path))) {
-        fprintf(stderr, "No wasm binary found under %s/binaries/wasm32-wasip2\n", tmp_dir);
+    if (!parse_model_description(tmp_dir, &metadata)) {
+        fprintf(stderr, "Failed to parse modelDescription.xml from %s\n", fmu_path);
+        return 1;
+    }
+
+    if (!find_wasm_in_fmu(tmp_dir, &metadata, wasm_path, sizeof(wasm_path))) {
+        fprintf(stderr, "No wasm binary found under %s/binaries/%s\n", tmp_dir, TARGET_PLATFORM);
         return 1;
     }
 
@@ -538,7 +764,7 @@ int main(int argc, char **argv) {
     cleanup_vals(enter_init_results, 1);
 
     {
-        const uint32_t vrs[] = {VR_INPUT_A, VR_INPUT_B};
+        const uint32_t vrs[] = {metadata.vr_input_a, metadata.vr_input_b};
         const double values[] = {0.0, 2.0};
         wasmtime_component_val_t set_args[3];
         set_args[0] = make_resource_val(cs_instance);
@@ -595,7 +821,7 @@ int main(int argc, char **argv) {
         double input_b = 2.0 + 2.0 * t;
 
         {
-            const uint32_t vrs[] = {VR_INPUT_A, VR_INPUT_B};
+            const uint32_t vrs[] = {metadata.vr_input_a, metadata.vr_input_b};
             const double values[] = {input_a, input_b};
             wasmtime_component_val_t set_args[3];
             set_args[0] = make_resource_val(cs_instance);
@@ -674,7 +900,7 @@ int main(int argc, char **argv) {
         }
 
         {
-            const uint32_t vrs[] = {VR_TIME, VR_SUM};
+            const uint32_t vrs[] = {metadata.vr_time, metadata.vr_sum};
             wasmtime_component_val_t get_args[2];
             get_args[0] = make_resource_val(cs_instance);
             get_args[1] = make_u32_list_val(vrs, 2);
