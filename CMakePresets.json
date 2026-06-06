@@ -1,0 +1,18 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "wasm",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "$env{WASI_SDK_PATH}/share/cmake/wasi-sdk-p2.cmake"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "wasm",
+      "configurePreset": "wasm"
+    }
+  ]
+}

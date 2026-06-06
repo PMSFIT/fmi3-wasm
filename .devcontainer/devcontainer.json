@@ -13,6 +13,9 @@
 			"wasm_tools_version": "1.251.0"
 		},
 		"./features/wasm-rust": {}
+	},
+	"containerEnv": {
+		"WASI_SDK_PATH": "/usr/local/lib/wasi-sdk-33.0-x86_64-linux"
 	}
 
 	// Use 'mounts' to make the cargo cache persistent in a Docker Volume.

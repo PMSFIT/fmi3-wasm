@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
-project(fmi3-wasm NONE)
+project(fmi3-wasm C)
 
 # ---------------------------------------------------------------------------
-# Find Cargo (Rust build tool) – required for building FMU examples
+# Find Cargo (Rust build tool) – required for the Rust FMU examples
 # ---------------------------------------------------------------------------
 find_program(CARGO_EXECUTABLE cargo
     HINTS ENV CARGO_HOME
@@ -12,7 +12,7 @@ find_program(CARGO_EXECUTABLE cargo
 
 if(NOT CARGO_EXECUTABLE)
     message(WARNING
-        "cargo not found – FMU example targets will be skipped.\n"
+        "cargo not found – Rust FMU example targets will be skipped.\n"
         "Install Rust from https://rustup.rs/ to enable them."
     )
 endif()
@@ -34,6 +34,22 @@ if(NOT WASM_TOOLS_EXECUTABLE)
 endif()
 
 message(STATUS "Found wasm-tools: ${WASM_TOOLS_EXECUTABLE}")
+
+# ---------------------------------------------------------------------------
+# Find wit-bindgen – required for the C FMU examples
+# ---------------------------------------------------------------------------
+find_program(WIT_BINDGEN_EXECUTABLE wit-bindgen
+    DOC "Path to the wit-bindgen CLI"
+)
+
+if(NOT WIT_BINDGEN_EXECUTABLE)
+    message(WARNING
+        "wit-bindgen not found – C FMU example targets will be skipped.\n"
+        "Install it with: cargo install wit-bindgen-cli"
+    )
+endif()
+
+message(STATUS "Found wit-bindgen: ${WIT_BINDGEN_EXECUTABLE}")
 
 # ---------------------------------------------------------------------------
 # Collect all .wit files under wit/
@@ -217,4 +233,171 @@ if(CARGO_EXECUTABLE)
             validate-adder-fmu
             adder-fmu-runner
     )
+endif()
+
+# ---------------------------------------------------------------------------
+# Example FMU: adder-c-fmu
+#
+# A Co-Simulation FMU identical in behaviour to adder-fmu but implemented in
+# pure C, using wit-bindgen-generated C bindings compiled via the WASI SDK
+# toolchain (wasm32-wasip2).
+#
+# Build:   cmake --build <build-dir> --target adder-c-fmu
+# Output:  <build-dir>/adder_c_fmu.wasm
+# ---------------------------------------------------------------------------
+if(WIT_BINDGEN_EXECUTABLE)
+    set(ADDER_C_FMU_DIR    "${CMAKE_SOURCE_DIR}/examples/adder-c-fmu")
+    set(ADDER_C_FMU_BINDGEN_DIR "${CMAKE_BINARY_DIR}/adder-c-fmu-bindgen")
+
+    # Generated file names produced by: wit-bindgen c --world co-simulation-fmu
+    set(ADDER_C_FMU_BINDGEN_H   "${ADDER_C_FMU_BINDGEN_DIR}/co_simulation_fmu.h")
+    set(ADDER_C_FMU_BINDGEN_C   "${ADDER_C_FMU_BINDGEN_DIR}/co_simulation_fmu.c")
+    set(ADDER_C_FMU_BINDGEN_OBJ "${ADDER_C_FMU_BINDGEN_DIR}/co_simulation_fmu_component_type.o")
+
+    # -----------------------------------------------------------------------
+    # Generate C bindings from the WIT package
+    # -----------------------------------------------------------------------
+    add_custom_command(
+        OUTPUT
+            "${ADDER_C_FMU_BINDGEN_H}"
+            "${ADDER_C_FMU_BINDGEN_C}"
+            "${ADDER_C_FMU_BINDGEN_OBJ}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${ADDER_C_FMU_BINDGEN_DIR}"
+        COMMAND ${WIT_BINDGEN_EXECUTABLE} c
+                --world co-simulation-fmu
+                "${CMAKE_SOURCE_DIR}/wit"
+                --out-dir "${ADDER_C_FMU_BINDGEN_DIR}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Generating C bindings for adder-c-fmu..."
+        VERBATIM
+        DEPENDS ${WIT_FILES}
+    )
+
+    # -----------------------------------------------------------------------
+    # Compile the C FMU to a wasm32-wasip2 component
+    # -----------------------------------------------------------------------
+    set(ADDER_C_FMU_WASM "${CMAKE_BINARY_DIR}/adder_c_fmu.wasm")
+
+    add_executable(adder-c-fmu-wasm
+        "${ADDER_C_FMU_DIR}/adder-c-fmu.c"
+        "${ADDER_C_FMU_BINDGEN_C}"
+    )
+
+    target_include_directories(adder-c-fmu-wasm PRIVATE "${ADDER_C_FMU_BINDGEN_DIR}")
+
+    set_target_properties(adder-c-fmu-wasm PROPERTIES
+        OUTPUT_NAME "adder_c_fmu"
+        SUFFIX      ".wasm"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    )
+
+    # Link the component-type object that wit-bindgen produces so the wasm
+    # binary carries the correct component-model metadata section.
+    target_link_options(adder-c-fmu-wasm PRIVATE
+        "${ADDER_C_FMU_BINDGEN_OBJ}"
+    )
+
+    # Ensure bindings are generated before compilation.
+    add_custom_target(adder-c-fmu-bindgen
+        DEPENDS
+            "${ADDER_C_FMU_BINDGEN_H}"
+            "${ADDER_C_FMU_BINDGEN_C}"
+            "${ADDER_C_FMU_BINDGEN_OBJ}"
+    )
+    add_dependencies(adder-c-fmu-wasm adder-c-fmu-bindgen)
+
+    add_custom_target(adder-c-fmu DEPENDS adder-c-fmu-wasm)
+
+    # Validate the compiled component against the WIT package.
+    add_custom_target(validate-adder-c-fmu
+        COMMAND ${WASM_TOOLS_EXECUTABLE} validate --features component-model
+                "${ADDER_C_FMU_WASM}"
+        DEPENDS adder-c-fmu-wasm
+        COMMENT "Validating adder-c-fmu Wasm component..."
+        VERBATIM
+    )
+
+    add_test(
+        NAME adder-c-fmu-wasm-validation
+        COMMAND ${WASM_TOOLS_EXECUTABLE} validate --features component-model
+                "${ADDER_C_FMU_WASM}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(adder-c-fmu-wasm-validation
+        PROPERTIES DEPENDS wit-validation
+    )
+
+    # -----------------------------------------------------------------------
+    # Package adder-c-fmu as a proper FMU archive (.fmu = zip)
+    # -----------------------------------------------------------------------
+    set(ADDER_C_FMU_ARCHIVE  "${CMAKE_BINARY_DIR}/adder-c-fmu.fmu")
+    set(ADDER_C_FMU_STAGING  "${CMAKE_BINARY_DIR}/adder-c-fmu-staging")
+    set(ADDER_C_FMU_MODEL_DESC "${ADDER_C_FMU_DIR}/modelDescription.xml")
+
+    add_custom_command(
+        OUTPUT "${ADDER_C_FMU_ARCHIVE}"
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "${ADDER_C_FMU_STAGING}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "${ADDER_C_FMU_STAGING}/binaries/wasm32-wasip2"
+        COMMAND ${CMAKE_COMMAND} -E copy
+                "${ADDER_C_FMU_MODEL_DESC}"
+                "${ADDER_C_FMU_STAGING}/modelDescription.xml"
+        COMMAND ${CMAKE_COMMAND} -E copy
+                "${ADDER_C_FMU_WASM}"
+                "${ADDER_C_FMU_STAGING}/binaries/wasm32-wasip2/adder_c_fmu.wasm"
+        COMMAND ${CMAKE_COMMAND} -E chdir "${ADDER_C_FMU_STAGING}"
+                ${CMAKE_COMMAND} -E tar cf "${ADDER_C_FMU_ARCHIVE}" --format=zip
+                -- modelDescription.xml binaries
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+        DEPENDS
+            adder-c-fmu-wasm
+            "${ADDER_C_FMU_MODEL_DESC}"
+        COMMENT "Packaging adder-c-fmu FMU archive (adder-c-fmu.fmu)..."
+        VERBATIM
+    )
+
+    add_custom_target(adder-c-fmu-archive
+        DEPENDS "${ADDER_C_FMU_ARCHIVE}"
+    )
+
+    # -----------------------------------------------------------------------
+    # Run the adder-fmu-runner against the C FMU to validate end-to-end
+    # -----------------------------------------------------------------------
+    if(CARGO_EXECUTABLE)
+        set(ADDER_FMU_RUNNER_DIR "${CMAKE_SOURCE_DIR}/examples/adder-fmu-runner")
+
+        add_custom_target(adder-c-fmu-runner
+            COMMAND ${CARGO_EXECUTABLE} run
+                    --manifest-path "${ADDER_FMU_RUNNER_DIR}/Cargo.toml"
+                    -- "${ADDER_C_FMU_ARCHIVE}"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            DEPENDS
+                adder-c-fmu-archive
+                "${ADDER_FMU_RUNNER_DIR}/Cargo.toml"
+                "${ADDER_FMU_RUNNER_DIR}/src/main.rs"
+                ${WIT_FILES}
+            COMMENT "Running adder-fmu-runner against adder-c-fmu.fmu..."
+            VERBATIM
+        )
+
+        add_test(
+            NAME adder-c-fmu-runner
+            COMMAND ${CARGO_EXECUTABLE} run
+                    --manifest-path "${ADDER_FMU_RUNNER_DIR}/Cargo.toml"
+                    -- "${ADDER_C_FMU_ARCHIVE}"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        )
+        set_tests_properties(adder-c-fmu-runner
+            PROPERTIES DEPENDS adder-c-fmu-wasm-validation
+        )
+
+        # Extend the top-level convenience target when both cargo and
+        # wit-bindgen are available.
+        if(TARGET run-all-examples)
+            add_dependencies(run-all-examples
+                validate-adder-c-fmu
+                adder-c-fmu-runner
+            )
+        endif()
+    endif()
 endif()
