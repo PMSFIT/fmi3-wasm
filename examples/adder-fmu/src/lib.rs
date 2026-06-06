@@ -4,22 +4,23 @@
 //!
 //! ## Variables
 //!
-//! | Value Reference | Name      | Causality | Type    | Description            |
-//! |-----------------|-----------|-----------|---------|------------------------|
-//! | 0               | `input_a` | input     | Float64 | First addend           |
-//! | 1               | `input_b` | input     | Float64 | Second addend          |
-//! | 2               | `sum`     | output    | Float64 | sum = input_a + input_b|
+//! | Value Reference | Name      | Causality     | Type    | Description               |
+//! |-----------------|-----------|---------------|---------|---------------------------|
+//! | 0               | `time`    | independent   | Float64 | Independent time variable |
+//! | 1               | `input_a` | input         | Float64 | First addend              |
+//! | 2               | `input_b` | input         | Float64 | Second addend             |
+//! | 3               | `sum`     | output        | Float64 | sum = input_a + input_b   |
 //!
 //! ## Lifecycle
 //!
 //! ```text
 //! co-simulation-instance::instantiate-co-simulation(...)  → cs
 //! co-simulation-instance::enter-initialization-mode(cs, ...)
-//! co-simulation-instance::set-float64(cs, [0, 1], [a0, b0])
+//! co-simulation-instance::set-float64(cs, [1, 2], [a0, b0])
 //! co-simulation-instance::exit-initialization-mode(cs)
 //! loop:
-//!   co-simulation-instance::set-float64(cs, [0, 1], [a, b])
-//!   co-simulation-instance::get-float64(cs, [2])
+//!   co-simulation-instance::set-float64(cs, [1, 2], [a, b])
+//!   co-simulation-instance::get-float64(cs, [0, 3])
 //!   co-simulation-instance::do-step(cs, t, h, false)
 //! co-simulation-instance::terminate(cs)
 //! ```
@@ -50,9 +51,10 @@ use fmi::fmi3::types::DependencyKind;
 // ---------------------------------------------------------------------------
 // Value-reference assignments
 // ---------------------------------------------------------------------------
-const VR_INPUT_A:    u32 = 0;
-const VR_INPUT_B:    u32 = 1;
-const VR_OUTPUT_SUM: u32 = 2;
+const VR_TIME:       u32 = 0;
+const VR_INPUT_A:    u32 = 1;
+const VR_INPUT_B:    u32 = 2;
+const VR_OUTPUT_SUM: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Shared simulation state
@@ -60,6 +62,7 @@ const VR_OUTPUT_SUM: u32 = 2;
 #[derive(Clone, Default)]
 struct AdderData {
     in_initialization_mode: bool,
+    current_time: f64,
     input_a: f64,
     input_b: f64,
     output_sum: f64,
@@ -154,6 +157,7 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
     fn reset(&self) -> Status {
         store_set(self.idx, |d| {
             d.in_initialization_mode = false;
+            d.current_time = 0.0;
             d.input_a = 0.0;
             d.input_b = 0.0;
             d.output_sum = 0.0;
@@ -176,6 +180,7 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
             value_references
                 .iter()
                 .map(|vr| match *vr {
+                    VR_TIME       => Ok(d.current_time),
                     VR_INPUT_A    => Ok(d.input_a),
                     VR_INPUT_B    => Ok(d.input_b),
                     VR_OUTPUT_SUM => Ok(d.output_sum),
@@ -241,7 +246,7 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
 
     fn get_number_of_variable_dependencies(&self, vr: u32) -> Result<u64, Status> {
         match vr {
-            VR_OUTPUT_SUM => Ok(2),
+            VR_OUTPUT_SUM => Ok(2),  // depends on VR_INPUT_A and VR_INPUT_B
             _             => Err(Status::Error),
         }
     }
@@ -275,22 +280,31 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
 
     fn get_fmu_state(&self) -> Result<Vec<u8>, Status> {
         store_get(self.idx, |d| {
-            let mut bytes = Vec::with_capacity(16);
+            let mut bytes = Vec::with_capacity(1 + 4 * 8);
+            bytes.push(if d.in_initialization_mode { 1 } else { 0 });
+            bytes.extend_from_slice(&d.current_time.to_le_bytes());
             bytes.extend_from_slice(&d.input_a.to_le_bytes());
             bytes.extend_from_slice(&d.input_b.to_le_bytes());
+            bytes.extend_from_slice(&d.output_sum.to_le_bytes());
             Ok(bytes)
         })
     }
 
     fn set_fmu_state(&self, state: Vec<u8>) -> Status {
-        if state.len() < 16 {
+        if state.len() < 1 + 4 * 8 {
             return Status::Error;
         }
-        let a = f64::from_le_bytes(state[0..8].try_into().unwrap());
-        let b = f64::from_le_bytes(state[8..16].try_into().unwrap());
+        let in_initialization_mode = state[0] != 0;
+        let time = f64::from_le_bytes(state[1..9].try_into().unwrap());
+        let a = f64::from_le_bytes(state[9..17].try_into().unwrap());
+        let b = f64::from_le_bytes(state[17..25].try_into().unwrap());
+        let output_sum = f64::from_le_bytes(state[25..33].try_into().unwrap());
         store_set(self.idx, |d| {
+            d.in_initialization_mode = in_initialization_mode;
+            d.current_time = time;
             d.input_a = a;
             d.input_b = b;
+            d.output_sum = output_sum;
         });
         Status::Ok
     }
@@ -377,11 +391,13 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
         communication_step_size:                 f64,
         _no_set_fmu_state_prior_to_current_point: bool,
     ) -> Result<DoStepResult, Status> {
+        let next_time = current_communication_point + communication_step_size;
         store_set(self.idx, |d| {
+            d.current_time = next_time;
             d.output_sum = d.input_a + d.input_b;
         });
         Ok(DoStepResult {
-            last_successful_time:  current_communication_point + communication_step_size,
+            last_successful_time:  next_time,
             event_handling_needed: false,
             terminate_simulation:  false,
             early_return:          false,

@@ -3,14 +3,17 @@
 //! Host runner that loads the `adder-fmu` WebAssembly component via wasmtime
 //! and drives a Co-Simulation from t = 0.0 s to t = 5.0 s in 0.1 s steps.
 //!
-//! ## Inputs
+//! ## Variables
 //!
-//! | Variable  | VR | Initial | Slope (per second) |
-//! |-----------|----|---------|--------------------|
-//! | `input_a` |  0 |   0.0   |        1.0         |
-//! | `input_b` |  1 |   2.0   |        2.0         |
+//! | Variable  | VR | Type        | Role                          |
+//! |-----------|----|-------------|-------------------------------|
+//! | `time`    |  0 | Independent | Time step tracking            |
+//! | `input_a` |  1 | Input       | First addend (slope 1.0/s)    |
+//! | `input_b` |  2 | Input       | Second addend (slope 2.0/s)   |
+//! | `sum`     |  3 | Output      | sum = input_a + input_b       |
 //!
 //! At communication point `t` the expected values are:
+//!   - `time(t)    = t` (independent time variable)
 //!   - `input_a(t) = t`
 //!   - `input_b(t) = 2.0 + 2.0 * t`
 //!   - `sum(t)     = input_a(t) + input_b(t)`
@@ -24,12 +27,12 @@
 //! ```text
 //! cs = co-simulation-instance::instantiate-co-simulation(...)
 //! cs.enter-initialization-mode(...)
-//! cs.set-float64([0,1], [0.0, 2.0])   // initial inputs
+//! cs.set-float64([1,2], [0.0, 2.0])   // initial inputs
 //! cs.exit-initialization-mode()
 //! for t in 0..n_steps:
-//!     cs.set-float64([0,1], [input_a(t), input_b(t)])
+//!     cs.set-float64([1,2], [input_a(t), input_b(t)])
 //!     cs.do-step(t, h, false)
-//!     cs.get-float64([2])              // read and verify sum
+//!     cs.get-float64([0, 3])          // read time and sum
 //! cs.terminate()
 //! ```
 //!
@@ -123,9 +126,10 @@ impl fmi::fmi3::types::Host for HostState {}
 // ---------------------------------------------------------------------------
 // Value-reference constants (must match the adder-fmu implementation)
 // ---------------------------------------------------------------------------
-const VR_INPUT_A: u32 = 0;
-const VR_INPUT_B: u32 = 1;
-const VR_SUM:     u32 = 2;
+const VR_TIME:     u32 = 0;
+const VR_INPUT_A:  u32 = 1;
+const VR_INPUT_B:  u32 = 2;
+const VR_SUM:      u32 = 3;
 
 // ---------------------------------------------------------------------------
 // FMU archive helpers
@@ -250,6 +254,20 @@ fn main() -> Result<()> {
         .co_simulation_instance()
         .call_set_float64(&mut store, cs, &[VR_INPUT_A, VR_INPUT_B], &[0.0, 2.0])?;
 
+    // Verify initial time value
+    let init_time_result = world
+        .fmi_fmi3_co_simulation()
+        .co_simulation_instance()
+        .call_get_float64(&mut store, cs, &[VR_TIME])?;
+    let init_time = match init_time_result {
+        Ok(v) => v[0],
+        Err(s) => bail!("get-float64 failed for time at initialization with status {s:?}"),
+    };
+    assert!(
+        (init_time - 0.0).abs() < tolerance,
+        "Initial time = {init_time} but expected 0.0",
+    );
+
     world
         .fmi_fmi3_co_simulation()
         .co_simulation_instance()
@@ -309,19 +327,27 @@ fn main() -> Result<()> {
             "do-step at step {i} (t={t:.1}): last_successful_time={lst} but expected {t_next}",
         );
 
-        // -- 3. Read and verify output at the new communication point --------
+        // -- 3. Read and verify output and time at the new communication point --------
         let expected_sum = input_a + input_b;
         let get_result = world
             .fmi_fmi3_co_simulation()
             .co_simulation_instance()
-            .call_get_float64(&mut store, cs, &[VR_SUM])?;
+            .call_get_float64(&mut store, cs, &[VR_TIME, VR_SUM])?;
 
         let values = match get_result {
             Ok(v)  => v,
             Err(s) => bail!("get-float64 failed at step {i} (t={t_next:.1}) with status {s:?}"),
         };
 
-        let got = values[0];
+        // Verify time variable matches expected t_next
+        let time_val = values[0];
+        assert!(
+            (time_val - t_next).abs() < tolerance,
+            "step {i}: time variable = {time_val} but expected {t_next}",
+        );
+
+        // Verify output sum
+        let got = values[1];
         assert!(
             (got - expected_sum).abs() < tolerance,
             "step {i} (t={t_next:.1}): output sum = {got} but expected {expected_sum}",
