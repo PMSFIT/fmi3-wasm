@@ -49,10 +49,13 @@ wit_bindgen::generate!({
 use std::cell::RefCell;
 
 use exports::fmi::fmi3::{
-    co_simulation::{DoStepResult, GuestCoSimulationInstance},
-    common::{Guest, GuestInstance, Status, DiscreteStatesInfo, VariableDependency, IntervalQualifier, IntervalFraction},
-    types::DependencyKind,
+    co_simulation::{DoStepResult, Guest as CoSimulationGuest, GuestCoSimulationInstance},
+    common::{
+        DiscreteStatesInfo, Guest as CommonGuest, GuestInstance, IntervalFraction,
+        IntervalQualifier, Status, VariableDependency,
+    },
 };
+use fmi::fmi3::types::DependencyKind;
 
 // ---------------------------------------------------------------------------
 // Value-reference assignments
@@ -413,11 +416,13 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
     /// `inst` is consumed (owned transfer in WIT).  The STORE slot it
     /// referenced continues to hold the simulation state and is now owned by
     /// this `AdderCoSimInstance`.
-    fn from_instance(inst: AdderInstance) -> Self {
-        let idx = inst.idx;
+    fn from_instance(
+        inst: exports::fmi::fmi3::common::Instance,
+    ) -> exports::fmi::fmi3::co_simulation::CoSimulationInstance {
+        let idx = inst.get::<AdderInstance>().idx;
         // `inst` is dropped here but the STORE entry at `idx` is intentionally
         // kept alive (no Drop impl removes it).
-        AdderCoSimInstance { idx }
+        exports::fmi::fmi3::co_simulation::CoSimulationInstance::new(AdderCoSimInstance { idx })
     }
 
     // ── Stepped simulation ───────────────────────────────────────────────────
@@ -433,6 +438,7 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
         communication_step_size:                 f64,
         _no_set_fmu_state_prior_to_current_point: bool,
     ) -> Result<DoStepResult, Status> {
+        let _ = self.idx;
         Ok(DoStepResult {
             last_successful_time:  current_communication_point + communication_step_size,
             event_handling_needed: false,
@@ -471,15 +477,19 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
 
 struct AdderFmu;
 
-impl Guest for AdderFmu {
+impl CommonGuest for AdderFmu {
     type Instance             = AdderInstance;
-    type CoSimulationInstance = AdderCoSimInstance;
-    
+
     // ── Version ─────────────────────────────────────────────────────────────
 
     fn get_version() -> String {
         "3.0".to_string()
     }
+
+}
+
+impl CoSimulationGuest for AdderFmu {
+    type CoSimulationInstance = AdderCoSimInstance;
 
 }
 
