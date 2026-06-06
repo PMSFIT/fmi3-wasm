@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <fmiModelDescription
   fmiVersion="3.0"
-  modelName="adder-fmu"
+  modelName="adder-rust-fmu"
   instantiationToken="{12345678-1234-1234-1234-123456789abc}"
   description="Example FMI 3.0 Co-Simulation FMU: sum of two Float64 inputs"
   version="0.1.0"
   generationTool="wit-bindgen / Rust / wasm32-wasip2">
   <CoSimulation
-    modelIdentifier="adder_fmu"
+    modelIdentifier="adder_rust_fmu"
     canHandleVariableCommunicationStepSize="true"
     hasEventMode="false"/>
   <DefaultExperiment startTime="0.0" stepSize="0.1"/>

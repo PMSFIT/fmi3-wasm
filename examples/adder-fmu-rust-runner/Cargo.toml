@@ -1,11 +1,11 @@
 [package]
-name    = "adder-fmu-runner"
+name    = "adder-fmu-rust-runner"
 version = "0.1.0"
 edition = "2021"
-description = "Host runner that exercises the adder-fmu Wasm component via wasmtime"
+description = "Host runner that exercises the adder-rust-fmu Wasm component via wasmtime"
 
 [[bin]]
-name = "adder-fmu-runner"
+name = "adder-fmu-rust-runner"
 path = "src/main.rs"
 
 [dependencies]

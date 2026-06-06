@@ -1,4 +1,4 @@
-//! # adder-fmu-runner
+//! # adder-fmu-rust-runner
 //!
 //! Host runner that loads the `adder-fmu` WebAssembly component via wasmtime
 //! and drives a Co-Simulation from t = 0.0 s to t = 5.0 s in 0.1 s steps.
@@ -39,7 +39,7 @@
 //! ## Usage
 //!
 //! ```text
-//! adder-fmu-runner <path/to/adder-fmu.fmu>
+//! adder-fmu-rust-runner <path/to/adder-fmu.fmu>
 //! ```
 
 use std::fs;
@@ -173,7 +173,7 @@ fn find_wasm_in_fmu(fmu_dir: &Path) -> Result<PathBuf> {
 fn main() -> Result<()> {
     let fmu_path = std::env::args()
         .nth(1)
-        .context("Usage: adder-fmu-runner <path/to/adder-fmu.fmu>")?;
+        .context("Usage: adder-fmu-rust-runner <path/to/adder-fmu.fmu>")?;
 
     // ── Extract FMU archive ────────────────────────────────────────────────
     // The TempDir is kept alive for the duration of `main`; it is removed

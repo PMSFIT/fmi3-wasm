@@ -1,4 +1,4 @@
-//! # adder-fmu
+//! # adder-rust-fmu
 //!
 //! A minimal FMI 3.0 Co-Simulation FMU implemented as a WebAssembly component.
 //!

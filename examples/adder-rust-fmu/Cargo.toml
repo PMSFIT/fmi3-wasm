@@ -1,5 +1,5 @@
 [package]
-name    = "adder-fmu"
+name    = "adder-rust-fmu"
 version = "0.1.0"
 edition = "2021"
 description = "Example FMI 3.0 Co-Simulation FMU: sum of two Float64 inputs"
