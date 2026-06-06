@@ -52,6 +52,20 @@ endif()
 message(STATUS "Found wit-bindgen: ${WIT_BINDGEN_EXECUTABLE}")
 
 # ---------------------------------------------------------------------------
+# Find curl – required for downloading dependencies for the C runner example
+# ---------------------------------------------------------------------------
+find_program(CURL_EXECUTABLE curl
+    DOC "Path to curl executable"
+)
+
+if(NOT CURL_EXECUTABLE)
+    message(WARNING
+        "curl not found – adder-fmu-c-runner will be skipped.\n"
+        "Install curl to enable it."
+    )
+endif()
+
+# ---------------------------------------------------------------------------
 # Collect all .wit files under wit/
 # ---------------------------------------------------------------------------
 file(GLOB_RECURSE WIT_FILES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/wit/*.wit")
@@ -222,6 +236,73 @@ if(CARGO_EXECUTABLE)
     )
 
     # -----------------------------------------------------------------------
+    # Example host runner: adder-fmu-c-runner
+    #
+    # Native C host implementation using Wasmtime's C embedding API.
+    # Download a pinned Wasmtime prebuilt C API bundle and compile the runner
+    # with the host C compiler.
+    # -----------------------------------------------------------------------
+    if(CURL_EXECUTABLE)
+        set(ADDER_FMU_C_RUNNER_DIR "${CMAKE_SOURCE_DIR}/examples/adder-fmu-c-runner")
+        set(ADDER_FMU_C_RUNNER_BUILD_DIR "${CMAKE_BINARY_DIR}/adder-fmu-c-runner-build")
+        set(ADDER_FMU_C_RUNNER_BIN "${ADDER_FMU_C_RUNNER_BUILD_DIR}/adder-fmu-c-runner")
+        set(WASMTIME_VERSION "v45.0.1")
+        set(WASMTIME_C_API_ARCHIVE_NAME "wasmtime-${WASMTIME_VERSION}-x86_64-linux-c-api.tar.xz")
+        set(WASMTIME_C_API_URL "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/${WASMTIME_C_API_ARCHIVE_NAME}")
+        set(WASMTIME_C_API_ARCHIVE "${CMAKE_BINARY_DIR}/third_party/${WASMTIME_C_API_ARCHIVE_NAME}")
+        set(WASMTIME_C_API_DIR "${CMAKE_BINARY_DIR}/third_party/wasmtime-${WASMTIME_VERSION}-x86_64-linux-c-api")
+
+        add_custom_command(
+            OUTPUT "${ADDER_FMU_C_RUNNER_BIN}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${ADDER_FMU_C_RUNNER_BUILD_DIR}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/third_party"
+            COMMAND /bin/sh -c "if [ ! -f '${WASMTIME_C_API_ARCHIVE}' ]; then '${CURL_EXECUTABLE}' --fail --location --output '${WASMTIME_C_API_ARCHIVE}' '${WASMTIME_C_API_URL}'; fi"
+            COMMAND /bin/sh -c "if [ ! -d '${WASMTIME_C_API_DIR}' ]; then cd '${CMAKE_BINARY_DIR}/third_party' && tar -xf '${WASMTIME_C_API_ARCHIVE}'; fi"
+            COMMAND cc -std=c11 -O2 -Wall -Wextra
+                    -I${WASMTIME_C_API_DIR}/include
+                    "${ADDER_FMU_C_RUNNER_DIR}/main.c"
+                    -L${WASMTIME_C_API_DIR}/lib
+                    -Wl,-rpath,${WASMTIME_C_API_DIR}/lib
+                    -lwasmtime -lpthread -ldl -lm
+                    -o "${ADDER_FMU_C_RUNNER_BIN}"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            DEPENDS
+                "${ADDER_FMU_C_RUNNER_DIR}/main.c"
+                adder-fmu-archive
+            COMMENT "Building adder-fmu-c-runner (C host with Wasmtime C API)..."
+            VERBATIM
+        )
+
+        add_custom_target(adder-fmu-c-runner-build
+            DEPENDS "${ADDER_FMU_C_RUNNER_BIN}"
+        )
+
+        add_custom_target(adder-fmu-c-runner
+            COMMAND "${ADDER_FMU_C_RUNNER_BIN}" "${ADDER_FMU_ARCHIVE}"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+            DEPENDS
+                adder-fmu-c-runner-build
+                adder-fmu-archive
+                "${ADDER_FMU_C_RUNNER_DIR}/main.c"
+            COMMENT "Running adder-fmu-c-runner against adder-fmu.fmu..."
+            VERBATIM
+        )
+
+        add_test(
+            NAME adder-fmu-c-runner
+            COMMAND "${ADDER_FMU_C_RUNNER_BIN}" "${ADDER_FMU_ARCHIVE}"
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        )
+        set_tests_properties(adder-fmu-c-runner
+            PROPERTIES DEPENDS adder-fmu-wasm-validation
+        )
+
+        if(TARGET run-all-examples)
+            add_dependencies(run-all-examples adder-fmu-c-runner)
+        endif()
+    endif()
+
+    # -----------------------------------------------------------------------
     # Top-level convenience target for all FMU examples and runners.
     #
     # Build/run with:
@@ -361,38 +442,29 @@ if(WIT_BINDGEN_EXECUTABLE)
     )
 
     # -----------------------------------------------------------------------
-    # Run the adder-fmu-runner against the C FMU to validate end-to-end
+    # Run the native C runner against adder-c-fmu to validate end-to-end
     # -----------------------------------------------------------------------
-    if(CARGO_EXECUTABLE)
-        set(ADDER_FMU_RUNNER_DIR "${CMAKE_SOURCE_DIR}/examples/adder-fmu-runner")
-
+    if(TARGET adder-fmu-c-runner-build)
         add_custom_target(adder-c-fmu-runner
-            COMMAND ${CARGO_EXECUTABLE} run
-                    --manifest-path "${ADDER_FMU_RUNNER_DIR}/Cargo.toml"
-                    -- "${ADDER_C_FMU_ARCHIVE}"
+            COMMAND "${ADDER_FMU_C_RUNNER_BIN}" "${ADDER_C_FMU_ARCHIVE}"
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
             DEPENDS
+                adder-fmu-c-runner-build
                 adder-c-fmu-archive
-                "${ADDER_FMU_RUNNER_DIR}/Cargo.toml"
-                "${ADDER_FMU_RUNNER_DIR}/src/main.rs"
-                ${WIT_FILES}
-            COMMENT "Running adder-fmu-runner against adder-c-fmu.fmu..."
+                "${ADDER_FMU_C_RUNNER_DIR}/main.c"
+            COMMENT "Running adder-fmu-c-runner against adder-c-fmu.fmu..."
             VERBATIM
         )
 
         add_test(
             NAME adder-c-fmu-runner
-            COMMAND ${CARGO_EXECUTABLE} run
-                    --manifest-path "${ADDER_FMU_RUNNER_DIR}/Cargo.toml"
-                    -- "${ADDER_C_FMU_ARCHIVE}"
+            COMMAND "${ADDER_FMU_C_RUNNER_BIN}" "${ADDER_C_FMU_ARCHIVE}"
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
         )
         set_tests_properties(adder-c-fmu-runner
             PROPERTIES DEPENDS adder-c-fmu-wasm-validation
         )
 
-        # Extend the top-level convenience target when both cargo and
-        # wit-bindgen are available.
         if(TARGET run-all-examples)
             add_dependencies(run-all-examples
                 validate-adder-c-fmu
