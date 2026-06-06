@@ -28,8 +28,8 @@
 //! cs.exit-initialization-mode()
 //! for t in 0..n_steps:
 //!     cs.set-float64([0,1], [input_a(t), input_b(t)])
-//!     cs.get-float64([2])              // read and verify sum
 //!     cs.do-step(t, h, false)
+//!     cs.get-float64([2])              // read and verify sum
 //! cs.terminate()
 //! ```
 //!
@@ -206,16 +206,20 @@ fn main() -> Result<()> {
 
     // ── Co-simulation loop ─────────────────────────────────────────────────
     //
-    // At each communication point `t = i * step_size`:
+    // For each interval [t, t + step_size):
     //
+    //   1) Set inputs for the interval start time t.
+    //   2) Call do-step(t, step_size, ...).
+    //   3) Read and verify output at t + step_size.
+    //
+    // Input profiles:
     //   input_a(t) = t               (start 0, slope 1 per second)
     //   input_b(t) = 2.0 + 2.0 * t  (start 2, slope 2 per second)
     //   sum(t)     = input_a + input_b
-    for i in 0..=n_steps {
-        let t            = i as f64 * step_size;
-        let input_a      = t;
-        let input_b      = 2.0 + 2.0 * t;
-        let expected_sum = input_a + input_b;
+    for i in 0..n_steps {
+        let t       = i as f64 * step_size;
+        let input_a = t;
+        let input_b = 2.0 + 2.0 * t;
 
         // -- 1. Update inputs ------------------------------------------------
         world
@@ -228,7 +232,34 @@ fn main() -> Result<()> {
                 &[input_a, input_b],
             )?;
 
-        // -- 2. Read and verify output ---------------------------------------
+        // -- 2. Advance time by one step -------------------------------------
+        let do_step_result = world
+            .fmi_fmi3_co_simulation()
+            .co_simulation_instance()
+            .call_do_step(&mut store, cs, t, step_size, false)?;
+
+        let r = match do_step_result {
+            Ok(r)  => r,
+            Err(s) => bail!("do-step failed at step {i} (t={t:.1}) with status {s:?}"),
+        };
+
+        assert!(
+            !r.terminate_simulation,
+            "do-step at step {i} (t={t:.1}) unexpectedly requested termination",
+        );
+        assert!(
+            !r.early_return,
+            "do-step at step {i} (t={t:.1}) had unexpected early return",
+        );
+        let t_next = t + step_size;
+        let lst = r.last_successful_time;
+        assert!(
+            (lst - t_next).abs() < tolerance,
+            "do-step at step {i} (t={t:.1}): last_successful_time={lst} but expected {t_next}",
+        );
+
+        // -- 3. Read and verify output at the new communication point --------
+        let expected_sum = input_a + input_b;
         let get_result = world
             .fmi_fmi3_co_simulation()
             .co_simulation_instance()
@@ -236,43 +267,14 @@ fn main() -> Result<()> {
 
         let values = match get_result {
             Ok(v)  => v,
-            Err(s) => bail!("get-float64 failed at step {i} (t={t:.1}) with status {s:?}"),
+            Err(s) => bail!("get-float64 failed at step {i} (t={t_next:.1}) with status {s:?}"),
         };
 
         let got = values[0];
         assert!(
             (got - expected_sum).abs() < tolerance,
-            "step {i} (t={t:.1}): output sum = {got} but expected {expected_sum} \
-             (input_a={input_a}, input_b={input_b})",
+            "step {i} (t={t_next:.1}): output sum = {got} but expected {expected_sum}",
         );
-
-        // -- 3. Advance time by one step (not at the final point) ------------
-        if i < n_steps {
-            let do_step_result = world
-                .fmi_fmi3_co_simulation()
-                .co_simulation_instance()
-                .call_do_step(&mut store, cs, t, step_size, false)?;
-
-            let r = match do_step_result {
-                Ok(r)  => r,
-                Err(s) => bail!("do-step failed at step {i} (t={t:.1}) with status {s:?}"),
-            };
-
-            assert!(
-                !r.terminate_simulation,
-                "do-step at step {i} (t={t:.1}) unexpectedly requested termination",
-            );
-            assert!(
-                !r.early_return,
-                "do-step at step {i} (t={t:.1}) had unexpected early return",
-            );
-            let lst = r.last_successful_time;
-            let expected_lst = t + step_size;
-            assert!(
-                (lst - expected_lst).abs() < tolerance,
-                "do-step at step {i} (t={t:.1}): last_successful_time={lst} but expected {expected_lst}",
-            );
-        }
     }
 
     // ── Terminate the instance ─────────────────────────────────────────────

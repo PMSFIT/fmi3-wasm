@@ -59,8 +59,10 @@ const VR_OUTPUT_SUM: u32 = 2;
 // ---------------------------------------------------------------------------
 #[derive(Clone, Default)]
 struct AdderData {
+    in_initialization_mode: bool,
     input_a: f64,
     input_b: f64,
+    output_sum: f64,
 }
 
 thread_local! {
@@ -124,10 +126,16 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
         _start_time: f64,
         _stop_time:  Option<f64>,
     ) -> Status {
+        store_set(self.idx, |d| {
+            d.in_initialization_mode = true;
+        });
         Status::Ok
     }
 
     fn exit_initialization_mode(&self) -> Status {
+        store_set(self.idx, |d| {
+            d.in_initialization_mode = false;
+        });
         Status::Ok
     }
 
@@ -145,8 +153,10 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
 
     fn reset(&self) -> Status {
         store_set(self.idx, |d| {
+            d.in_initialization_mode = false;
             d.input_a = 0.0;
             d.input_b = 0.0;
+            d.output_sum = 0.0;
         });
         Status::Ok
     }
@@ -168,7 +178,7 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
                 .map(|vr| match *vr {
                     VR_INPUT_A    => Ok(d.input_a),
                     VR_INPUT_B    => Ok(d.input_b),
-                    VR_OUTPUT_SUM => Ok(d.input_a + d.input_b),
+                    VR_OUTPUT_SUM => Ok(d.output_sum),
                     _             => Err(Status::Error),
                 })
                 .collect()
@@ -185,7 +195,14 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
                 }
             }
             Status::Ok
-        })
+        });
+        if store_get(self.idx, |d| d.in_initialization_mode) {
+            // Update output sum immediately when in initialization mode.
+            store_set(self.idx, |d| {
+                d.output_sum = d.input_a + d.input_b;
+            });
+        }
+        Status::Ok
     }
 
     // ── All other typed getters – not supported ──────────────────────────────
@@ -360,6 +377,9 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
         communication_step_size:                 f64,
         _no_set_fmu_state_prior_to_current_point: bool,
     ) -> Result<DoStepResult, Status> {
+        store_set(self.idx, |d| {
+            d.output_sum = d.input_a + d.input_b;
+        });
         Ok(DoStepResult {
             last_successful_time:  current_communication_point + communication_step_size,
             event_handling_needed: false,
