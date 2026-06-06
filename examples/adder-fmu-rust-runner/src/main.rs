@@ -61,6 +61,8 @@ wasmtime::component::bindgen!({
 
 use fmi::fmi3::types::Status;
 
+const TARGET_PLATFORM: &str = "wasm32-wasip2";
+
 // ---------------------------------------------------------------------------
 // Host state
 // ---------------------------------------------------------------------------
@@ -124,12 +126,20 @@ impl fmi::fmi3::intermediate_update_callbacks::Host for HostState {
 impl fmi::fmi3::types::Host for HostState {}
 
 // ---------------------------------------------------------------------------
-// Value-reference constants (must match the adder-fmu implementation)
+// Parsed FMU metadata
 // ---------------------------------------------------------------------------
-const VR_TIME:     u32 = 0;
-const VR_INPUT_A:  u32 = 1;
-const VR_INPUT_B:  u32 = 2;
-const VR_SUM:      u32 = 3;
+
+struct VariableReferences {
+    time: u32,
+    input_a: u32,
+    input_b: u32,
+    sum: u32,
+}
+
+struct FmuMetadata {
+    model_identifier: String,
+    vrs: VariableReferences,
+}
 
 // ---------------------------------------------------------------------------
 // FMU archive helpers
@@ -151,19 +161,85 @@ fn extract_fmu(fmu_path: &str) -> Result<TempDir> {
     Ok(tmp)
 }
 
-/// Locate the first `.wasm` file inside `<fmu_dir>/binaries/wasm32-wasip2/`.
-fn find_wasm_in_fmu(fmu_dir: &Path) -> Result<PathBuf> {
-    let wasm_dir = fmu_dir.join("binaries").join("wasm32-wasip2");
-    for entry in fs::read_dir(&wasm_dir)
-        .with_context(|| format!("Missing directory '{}'", wasm_dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("wasm") {
-            return Ok(path);
+fn read_fmu_metadata(fmu_dir: &Path) -> Result<FmuMetadata> {
+    let model_description_path = fmu_dir.join("modelDescription.xml");
+    let xml = fs::read_to_string(&model_description_path)
+        .with_context(|| format!("Failed to read '{}'", model_description_path.display()))?;
+    let doc = roxmltree::Document::parse(&xml)
+        .with_context(|| format!("Failed to parse '{}'", model_description_path.display()))?;
+    let root = doc.root_element();
+
+    let co_simulation = root
+        .children()
+        .find(|node| node.is_element() && node.has_tag_name("CoSimulation"))
+        .context("Missing CoSimulation element in modelDescription.xml")?;
+
+    let model_identifier = co_simulation
+        .attribute("modelIdentifier")
+        .context("Missing CoSimulation modelIdentifier in modelDescription.xml")?
+        .to_owned();
+
+    let model_variables = root
+        .children()
+        .find(|node| node.is_element() && node.has_tag_name("ModelVariables"))
+        .context("Missing ModelVariables element in modelDescription.xml")?;
+
+    let mut time = None;
+    let mut input_a = None;
+    let mut input_b = None;
+    let mut sum = None;
+
+    for variable in model_variables.children().filter(|node| node.is_element()) {
+        let name = match variable.attribute("name") {
+            Some(name) => name,
+            None => continue,
+        };
+        let value_reference = match variable.attribute("valueReference") {
+            Some(value_reference) => value_reference
+                .parse::<u32>()
+                .with_context(|| format!("Invalid valueReference for variable '{name}'"))?,
+            None => continue,
+        };
+
+        let slot = match name {
+            "time" => &mut time,
+            "input_a" => &mut input_a,
+            "input_b" => &mut input_b,
+            "sum" => &mut sum,
+            _ => continue,
+        };
+
+        if slot.replace(value_reference).is_some() {
+            bail!("Duplicate variable '{name}' in modelDescription.xml");
         }
     }
-    bail!("No .wasm file found in '{}'", wasm_dir.display())
+
+    let vrs = VariableReferences {
+        time: time.context("Missing variable 'time' in modelDescription.xml")?,
+        input_a: input_a.context("Missing variable 'input_a' in modelDescription.xml")?,
+        input_b: input_b.context("Missing variable 'input_b' in modelDescription.xml")?,
+        sum: sum.context("Missing variable 'sum' in modelDescription.xml")?,
+    };
+
+    Ok(FmuMetadata {
+        model_identifier,
+        vrs,
+    })
+}
+
+/// Locate the wasm component using the FMU's modelIdentifier.
+fn find_wasm_in_fmu(fmu_dir: &Path, model_identifier: &str) -> Result<PathBuf> {
+    let wasm_dir = fmu_dir.join("binaries").join(TARGET_PLATFORM);
+    let wasm_path = wasm_dir.join(format!("{model_identifier}.wasm"));
+    if wasm_path.is_file() {
+        Ok(wasm_path)
+    } else {
+        bail!(
+            "Missing wasm component '{}' in '{}'",
+            wasm_path.display(),
+            wasm_dir.display()
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -181,7 +257,10 @@ fn main() -> Result<()> {
     let tmp_dir = extract_fmu(&fmu_path)
         .with_context(|| format!("Failed to extract FMU archive '{fmu_path}'"))?;
 
-    let wasm_path = find_wasm_in_fmu(tmp_dir.path())
+    let metadata = read_fmu_metadata(tmp_dir.path())
+        .with_context(|| format!("Failed to read FMU metadata from '{fmu_path}'"))?;
+
+    let wasm_path = find_wasm_in_fmu(tmp_dir.path(), &metadata.model_identifier)
         .with_context(|| format!("No wasm component found inside '{fmu_path}'"))?;
 
     println!("Extracted FMU to '{}'", tmp_dir.path().display());
@@ -252,13 +331,18 @@ fn main() -> Result<()> {
     world
         .fmi_fmi3_co_simulation()
         .co_simulation_instance()
-        .call_set_float64(&mut store, cs, &[VR_INPUT_A, VR_INPUT_B], &[0.0, 2.0])?;
+        .call_set_float64(
+            &mut store,
+            cs,
+            &[metadata.vrs.input_a, metadata.vrs.input_b],
+            &[0.0, 2.0],
+        )?;
 
     // Verify initial time value
     let init_time_result = world
         .fmi_fmi3_co_simulation()
         .co_simulation_instance()
-        .call_get_float64(&mut store, cs, &[VR_TIME])?;
+        .call_get_float64(&mut store, cs, &[metadata.vrs.time])?;
     let init_time = match init_time_result {
         Ok(v) => v[0],
         Err(s) => bail!("get-float64 failed for time at initialization with status {s:?}"),
@@ -297,7 +381,7 @@ fn main() -> Result<()> {
             .call_set_float64(
                 &mut store,
                 cs,
-                &[VR_INPUT_A, VR_INPUT_B],
+                &[metadata.vrs.input_a, metadata.vrs.input_b],
                 &[input_a, input_b],
             )?;
 
@@ -332,7 +416,7 @@ fn main() -> Result<()> {
         let get_result = world
             .fmi_fmi3_co_simulation()
             .co_simulation_instance()
-            .call_get_float64(&mut store, cs, &[VR_TIME, VR_SUM])?;
+            .call_get_float64(&mut store, cs, &[metadata.vrs.time, metadata.vrs.sum])?;
 
         let values = match get_result {
             Ok(v)  => v,
