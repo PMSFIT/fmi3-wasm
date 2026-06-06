@@ -2,8 +2,11 @@
 package fmi:fmi3@3.0.0;
 
 interface model-exchange {
-  use types.{value-reference, status, discrete-states-info};
-  use common.{instance};
+  use types.{
+    value-reference, status, fmu-state,
+    interval-qualifier, interval-fraction,
+    variable-dependency, discrete-states-info,
+  };
 
   /// Result of fmi3CompletedIntegratorStep, indicating whether the master
   /// should trigger event processing or discard the step.
@@ -18,13 +21,176 @@ interface model-exchange {
 
     // ── Construction ──────────────────────────────────────────────────────────
 
-    /// Wrap a common `instance` (previously created with
-    /// instance::instantiate-model-exchange) into a model-exchange-instance.
+    /// Instantiate a Model Exchange FMU instance.
     ///
-    /// This two-step pattern mirrors how the C API uses the same
-    /// fmi3Instance type for all interface kinds while the ME-specific
-    /// functions are available only after ME instantiation.
-    from-instance: static func(inst: instance) -> model-exchange-instance;
+    /// FMI C: fmi3Instance fmi3InstantiateModelExchange(
+    ///     fmi3String instanceName, fmi3String instantiationToken,
+    ///     fmi3String resourcePath, fmi3Boolean visible,
+    ///     fmi3Boolean loggingOn,
+    ///     fmi3InstanceEnvironment instanceEnvironment,
+    ///     fmi3LogMessageCallback logMessage);
+    instantiate-model-exchange: static func(
+      instance-name:        string,
+      instantiation-token:  string,
+      resource-path:        string,
+      visible:              bool,
+      logging-on:           bool,
+    ) -> option<model-exchange-instance>;
+
+    // ── Debug logging ─────────────────────────────────────────────────────────
+
+    /// Enable or disable logging for specific categories.
+    ///
+    /// FMI C: fmi3Status fmi3SetDebugLogging(...)
+    set-debug-logging: func(logging-on: bool, categories: list<string>) -> status;
+
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    /// Transition to Initialisation Mode.
+    ///
+    /// FMI C: fmi3Status fmi3EnterInitializationMode(...)
+    enter-initialization-mode: func(
+      tolerance:  option<f64>,
+      start-time: f64,
+      stop-time:  option<f64>,
+    ) -> status;
+
+    /// Leave Initialisation Mode and enter the appropriate operating mode.
+    ///
+    /// FMI C: fmi3Status fmi3ExitInitializationMode(fmi3Instance instance);
+    exit-initialization-mode: func() -> status;
+
+    /// Enter Event Mode.
+    ///
+    /// FMI C: fmi3Status fmi3EnterEventMode(fmi3Instance instance);
+    enter-event-mode: func() -> status;
+
+    /// Update discrete states and check for further event iterations.
+    ///
+    /// FMI C: fmi3Status fmi3UpdateDiscreteStates(...)
+    update-discrete-states: func() -> result<discrete-states-info, status>;
+
+    /// Terminate the simulation run (orderly shutdown).
+    ///
+    /// FMI C: fmi3Status fmi3Terminate(fmi3Instance instance);
+    terminate: func() -> status;
+
+    /// Reset the instance to the state after fmi3Instantiate*.
+    ///
+    /// FMI C: fmi3Status fmi3Reset(fmi3Instance instance);
+    reset: func() -> status;
+
+    // ── Configuration mode ───────────────────────────────────────────────────
+
+    /// Enter Configuration Mode to set structural parameters.
+    ///
+    /// FMI C: fmi3Status fmi3EnterConfigurationMode(fmi3Instance instance);
+    enter-configuration-mode: func() -> status;
+
+    /// Leave Configuration Mode.
+    ///
+    /// FMI C: fmi3Status fmi3ExitConfigurationMode(fmi3Instance instance);
+    exit-configuration-mode: func() -> status;
+
+    // ── Variable getters ──────────────────────────────────────────────────────
+
+    get-float32: func(value-references: list<value-reference>) -> result<list<f32>, status>;
+    get-float64: func(value-references: list<value-reference>) -> result<list<f64>, status>;
+    get-int8:    func(value-references: list<value-reference>) -> result<list<s8>,  status>;
+    get-int16:   func(value-references: list<value-reference>) -> result<list<s16>, status>;
+    get-int32:   func(value-references: list<value-reference>) -> result<list<s32>, status>;
+    get-int64:   func(value-references: list<value-reference>) -> result<list<s64>, status>;
+    get-uint8:   func(value-references: list<value-reference>) -> result<list<u8>,  status>;
+    get-uint16:  func(value-references: list<value-reference>) -> result<list<u16>, status>;
+    get-uint32:  func(value-references: list<value-reference>) -> result<list<u32>, status>;
+    get-uint64:  func(value-references: list<value-reference>) -> result<list<u64>, status>;
+    get-boolean: func(value-references: list<value-reference>) -> result<list<bool>, status>;
+    get-string:  func(value-references: list<value-reference>) -> result<list<string>, status>;
+    get-binary:  func(value-references: list<value-reference>) -> result<list<list<u8>>, status>;
+    get-clock:   func(value-references: list<value-reference>) -> result<list<bool>, status>;
+
+    // ── Variable setters ──────────────────────────────────────────────────────
+
+    set-float32: func(value-references: list<value-reference>, values: list<f32>)    -> status;
+    set-float64: func(value-references: list<value-reference>, values: list<f64>)    -> status;
+    set-int8:    func(value-references: list<value-reference>, values: list<s8>)     -> status;
+    set-int16:   func(value-references: list<value-reference>, values: list<s16>)    -> status;
+    set-int32:   func(value-references: list<value-reference>, values: list<s32>)    -> status;
+    set-int64:   func(value-references: list<value-reference>, values: list<s64>)    -> status;
+    set-uint8:   func(value-references: list<value-reference>, values: list<u8>)     -> status;
+    set-uint16:  func(value-references: list<value-reference>, values: list<u16>)    -> status;
+    set-uint32:  func(value-references: list<value-reference>, values: list<u32>)    -> status;
+    set-uint64:  func(value-references: list<value-reference>, values: list<u64>)    -> status;
+    set-boolean: func(value-references: list<value-reference>, values: list<bool>)   -> status;
+    set-string:  func(value-references: list<value-reference>, values: list<string>) -> status;
+    set-binary:  func(value-references: list<value-reference>, values: list<list<u8>>) -> status;
+    set-clock:   func(value-references: list<value-reference>, values: list<bool>)   -> status;
+
+    // ── Variable dependencies ─────────────────────────────────────────────────
+
+    get-number-of-variable-dependencies: func(vr: value-reference) -> result<u64, status>;
+    get-variable-dependencies: func(
+      dependent: value-reference,
+    ) -> result<list<variable-dependency>, status>;
+
+    // ── FMU state (save / restore) ────────────────────────────────────────────
+
+    get-fmu-state: func() -> result<fmu-state, status>;
+    set-fmu-state: func(state: fmu-state) -> status;
+
+    // ── Directional derivatives ───────────────────────────────────────────────
+
+    get-directional-derivative: func(
+      unknowns:  list<value-reference>,
+      knowns:    list<value-reference>,
+      seed:      list<f64>,
+    ) -> result<list<f64>, status>;
+
+    get-adjoint-derivative: func(
+      unknowns:  list<value-reference>,
+      knowns:    list<value-reference>,
+      seed:      list<f64>,
+    ) -> result<list<f64>, status>;
+
+    // ── Clock interval / shift queries ────────────────────────────────────────
+
+    get-interval-decimal: func(
+      value-references: list<value-reference>,
+    ) -> result<list<tuple<f64, interval-qualifier>>, status>;
+
+    get-interval-fraction: func(
+      value-references: list<value-reference>,
+    ) -> result<list<tuple<interval-fraction, interval-qualifier>>, status>;
+
+    get-shift-decimal: func(
+      value-references: list<value-reference>,
+    ) -> result<list<f64>, status>;
+
+    get-shift-fraction: func(
+      value-references: list<value-reference>,
+    ) -> result<list<interval-fraction>, status>;
+
+    set-interval-decimal: func(
+      value-references: list<value-reference>,
+      intervals:        list<f64>,
+    ) -> status;
+
+    set-interval-fraction: func(
+      value-references: list<value-reference>,
+      intervals:        list<interval-fraction>,
+    ) -> status;
+
+    set-shift-decimal: func(
+      value-references: list<value-reference>,
+      shifts:           list<f64>,
+    ) -> status;
+
+    set-shift-fraction: func(
+      value-references: list<value-reference>,
+      shifts:           list<interval-fraction>,
+    ) -> status;
+
+    evaluate-discrete-states: func() -> status;
 
     // ── Mode transitions ──────────────────────────────────────────────────────
 
@@ -33,8 +199,7 @@ interface model-exchange {
     /// FMI C: fmi3Status fmi3EnterContinuousTimeMode(fmi3Instance instance);
     enter-continuous-time-mode: func() -> status;
 
-    /// Transition back into Step Mode (FMI 3.0 adds an explicit step mode for
-    /// ME to allow output derivatives to be queried between steps).
+    /// Transition back into Step Mode.
     ///
     /// FMI C: fmi3Status fmi3EnterStepMode(fmi3Instance instance);
     enter-step-mode: func() -> status;
@@ -48,53 +213,39 @@ interface model-exchange {
 
     /// Set the continuous state vector.
     ///
-    /// FMI C: fmi3Status fmi3SetContinuousStates(
-    ///     fmi3Instance instance,
-    ///     const fmi3Float64 continuousStates[], size_t nContinuousStates);
+    /// FMI C: fmi3Status fmi3SetContinuousStates(...)
     set-continuous-states: func(continuous-states: list<f64>) -> status;
 
     // ── Derivative & event-indicator getters ─────────────────────────────────
 
     /// Retrieve the continuous-state derivatives ẋ = f(t, x, u).
     ///
-    /// FMI C: fmi3Status fmi3GetContinuousStateDerivatives(
-    ///     fmi3Instance instance,
-    ///     fmi3Float64 derivatives[], size_t nContinuousStates);
+    /// FMI C: fmi3Status fmi3GetContinuousStateDerivatives(...)
     get-continuous-state-derivatives: func() -> result<list<f64>, status>;
 
     /// Retrieve zero-crossing (event-indicator) functions.
     ///
-    /// FMI C: fmi3Status fmi3GetEventIndicators(
-    ///     fmi3Instance instance,
-    ///     fmi3Float64 eventIndicators[], size_t nEventIndicators);
+    /// FMI C: fmi3Status fmi3GetEventIndicators(...)
     get-event-indicators: func() -> result<list<f64>, status>;
 
-    /// Retrieve the current continuous state vector (read-back after a
-    /// successful integrator step).
+    /// Retrieve the current continuous state vector.
     ///
-    /// FMI C: fmi3Status fmi3GetContinuousStates(
-    ///     fmi3Instance instance,
-    ///     fmi3Float64 continuousStates[], size_t nContinuousStates);
+    /// FMI C: fmi3Status fmi3GetContinuousStates(...)
     get-continuous-states: func() -> result<list<f64>, status>;
 
-    /// Retrieve the nominal values of the continuous states (used for scaling
-    /// in the integrator).
+    /// Retrieve the nominal values of the continuous states.
     ///
-    /// FMI C: fmi3Status fmi3GetNominalsOfContinuousStates(
-    ///     fmi3Instance instance,
-    ///     fmi3Float64 nominals[], size_t nContinuousStates);
+    /// FMI C: fmi3Status fmi3GetNominalsOfContinuousStates(...)
     get-nominals-of-continuous-states: func() -> result<list<f64>, status>;
 
     /// Query how many event indicators the FMU has.
     ///
-    /// FMI C: fmi3Status fmi3GetNumberOfEventIndicators(
-    ///     fmi3Instance instance, size_t* nEventIndicators);
+    /// FMI C: fmi3Status fmi3GetNumberOfEventIndicators(...)
     get-number-of-event-indicators: func() -> result<u64, status>;
 
     /// Query how many continuous states the FMU has.
     ///
-    /// FMI C: fmi3Status fmi3GetNumberOfContinuousStates(
-    ///     fmi3Instance instance, size_t* nContinuousStates);
+    /// FMI C: fmi3Status fmi3GetNumberOfContinuousStates(...)
     get-number-of-continuous-states: func() -> result<u64, status>;
 
     // ── Step completion ───────────────────────────────────────────────────────
@@ -107,24 +258,15 @@ interface model-exchange {
     ///     fmi3Boolean noSetFMUStatePriorToCurrentPoint,
     ///     fmi3Boolean* enterEventMode,
     ///     fmi3Boolean* terminateSimulation);
-    ///
-    /// Mapping: output booleans are aggregated into completed-step-result.
     completed-integrator-step: func(
       no-set-fmu-state-prior-to-current-point: bool,
     ) -> result<completed-step-result, status>;
 
     // ── Output derivatives ────────────────────────────────────────────────────
 
-    /// Retrieve higher-order output derivatives (shared with Co-Simulation).
+    /// Retrieve higher-order output derivatives.
     ///
-    /// FMI C: fmi3Status fmi3GetOutputDerivatives(
-    ///     fmi3Instance instance,
-    ///     const fmi3ValueReference vrs[], size_t nVRs,
-    ///     const fmi3UInt32 orders[], size_t nOrders,
-    ///     fmi3Float64 values[], size_t nValues);
-    ///
-    /// Mapping: (vr, order) pairs are interleaved in a list of tuples to
-    ///          avoid two parallel lists.
+    /// FMI C: fmi3Status fmi3GetOutputDerivatives(...)
     get-output-derivatives: func(
       requests: list<tuple<value-reference, u32>>,
     ) -> result<list<f64>, status>;

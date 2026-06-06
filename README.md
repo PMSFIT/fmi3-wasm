@@ -8,10 +8,10 @@ WIT definitions that map the [FMI 3.0](https://svn.modelica.org/fmi/branches/pub
 wit/
 ├── fmi3-types.wit              # Primitive types, enums, records
 ├── fmi3-callbacks.wit          # Environment → FMU callbacks
-├── fmi3-common.wit             # Common functions + fmu-instance resource
-├── fmi3-model-exchange.wit     # ME-specific methods
-├── fmi3-co-simulation.wit      # CS-specific methods
-├── fmi3-scheduled-execution.wit# SE-specific methods
+├── fmi3-common.wit             # get-version free function only
+├── fmi3-model-exchange.wit     # Standalone ME instance resource + all methods
+├── fmi3-co-simulation.wit      # Standalone CS instance resource + all methods
+├── fmi3-scheduled-execution.wit# Standalone SE instance resource + all methods
 └── world.wit                   # Composed worlds for each FMU kind
 ```
 
@@ -24,18 +24,28 @@ wasm-tools component wit wit/
 
 ## Design decisions
 
-### `fmi3Instance` → `resource instance`
+### `fmi3Instance` → three standalone resources
 
-The opaque C pointer maps directly to a WIT `resource`.  Resource ownership is
-linear: the runtime calls `fmi3FreeInstance` when the resource is dropped, so
-explicit `fmi3FreeInstance` bindings are unnecessary.
+The opaque C pointer is mapped to three distinct WIT resources — one per
+interface kind:
 
-### Three interface kinds → three separate resources
+| FMU kind           | WIT resource                    | Static factory                     |
+|--------------------|----------------------------------|-------------------------------------|
+| Model Exchange     | `model-exchange-instance`        | `instantiate-model-exchange`        |
+| Co-Simulation      | `co-simulation-instance`         | `instantiate-co-simulation`         |
+| Scheduled Execution| `scheduled-execution-instance`   | `instantiate-scheduled-execution`   |
 
-`model-exchange-instance`, `co-simulation-instance`, and
-`scheduled-execution-instance` each wrap the base `instance` resource.  This
-makes the type system enforce that ME-only methods (e.g. `set-time`) cannot be
-called on a CS instance, which was impossible to express in the C API.
+Each resource owns the full lifecycle of the FMU instance: it carries the
+instantiation factory as a static method, all common lifecycle and variable
+access methods (`enter-initialization-mode`, `get-float64`, `set-fmu-state`,
+etc.), and the interface-kind-specific methods (`do-step`, `set-time`, …).
+
+Resource ownership is linear: `fmi3FreeInstance` is called when the resource
+is dropped, so no explicit free binding is needed.
+
+This design means the host never holds an intermediate `common::instance`
+handle: instantiation and all operations go through the single typed resource,
+making it impossible to call ME-only methods (e.g. `set-time`) on a CS handle.
 
 ### Callback pointers → imported interfaces
 
@@ -109,7 +119,7 @@ type becomes `list<list<u8>>`.
 | `fmi3Binary`             | `list<u8>`        | Length-prefixed blob               |
 | `fmi3Clock`              | `bool`            | true = tick                        |
 | `fmi3FMUState`           | `list<u8>`        | Serialised immediately             |
-| `fmi3Instance`           | `resource instance` | Owned handle                     |
+| `fmi3Instance`           | `resource model-exchange-instance` / `co-simulation-instance` / `scheduled-execution-instance` | Owned handle; one resource per interface kind |
 | `fmi3Status`             | `enum status`     | Five variants                      |
 | `fmi3IntervalQualifier`  | `enum interval-qualifier` | Three variants             |
 | `fmi3DependencyKind`     | `enum dependency-kind` | Five variants                 |
@@ -117,8 +127,9 @@ type becomes `list<list<u8>>`.
 
 ## Known limitations and future work
 
-1. **`fmi3GetVersion` is a free function** — it is exposed at the interface
-   level rather than as a resource method, matching the C API.
+1. **`fmi3GetVersion` is a free function** — it is the only item in the
+   `common` interface, exposed at the interface level rather than as a resource
+   method, matching the C API.
 
 2. **Model description XML** — FMI 3.0 ships metadata as `modelDescription.xml`
    inside the FMU archive.  This mapping covers only the runtime API; the

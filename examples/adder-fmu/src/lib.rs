@@ -13,28 +13,16 @@
 //! ## Lifecycle
 //!
 //! ```text
-//! instance::instantiate-co-simulation(...)  → inst
-//! instance::enter-initialization-mode(inst, ...)
-//! instance::set-float64(inst, [0, 1], [a0, b0])
-//! instance::exit-initialization-mode(inst)
-//! cs := co-simulation-instance::from-instance(inst)   ← inst consumed here
+//! co-simulation-instance::instantiate-co-simulation(...)  → cs
+//! co-simulation-instance::enter-initialization-mode(cs, ...)
+//! co-simulation-instance::set-float64(cs, [0, 1], [a0, b0])
+//! co-simulation-instance::exit-initialization-mode(cs)
 //! loop:
+//!   co-simulation-instance::set-float64(cs, [0, 1], [a, b])
+//!   co-simulation-instance::get-float64(cs, [2])
 //!   co-simulation-instance::do-step(cs, t, h, false)
-//! co-simulation-instance::drop(cs)
+//! co-simulation-instance::terminate(cs)
 //! ```
-//!
-//! ### Note on variable access after `from-instance`
-//!
-//! The WIT `co-simulation-fmu` world passes the `common::instance` handle by
-//! value into `co-simulation-instance::from-instance`, transferring ownership.
-//! After that call the host no longer holds an `instance` handle and therefore
-//! cannot invoke `get-float64` / `set-float64` directly.
-//!
-//! This implementation works around the limitation by storing simulation state
-//! in a thread-local table keyed by a slot index that both `AdderInstance` and
-//! `AdderCoSimInstance` share.  A future revision of the WIT interfaces could
-//! address this by using `borrow<instance>` in `from-instance`, or by adding
-//! typed get/set methods to `co-simulation-instance`.
 
 #![allow(unused_variables)]
 
@@ -49,11 +37,13 @@ wit_bindgen::generate!({
 use std::cell::RefCell;
 
 use exports::fmi::fmi3::{
-    co_simulation::{DoStepResult, Guest as CoSimulationGuest, GuestCoSimulationInstance},
-    common::{
-        DiscreteStatesInfo, Guest as CommonGuest, GuestInstance, IntervalFraction,
-        IntervalQualifier, Status, VariableDependency,
+    co_simulation::{
+        DoStepResult, Guest as CoSimulationGuest, GuestCoSimulationInstance,
     },
+    common::Guest as CommonGuest,
+};
+use exports::fmi::fmi3::co_simulation::{
+    DiscreteStatesInfo, IntervalFraction, IntervalQualifier, Status, VariableDependency,
 };
 use fmi::fmi3::types::DependencyKind;
 
@@ -66,9 +56,6 @@ const VR_OUTPUT_SUM: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // Shared simulation state
-//
-// Wasm components run in a single thread, so a thread-local Vec is safe.
-// Slots are never freed; FMUs have a small, well-known number of instances.
 // ---------------------------------------------------------------------------
 #[derive(Clone, Default)]
 struct AdderData {
@@ -80,7 +67,6 @@ thread_local! {
     static STORE: RefCell<Vec<AdderData>> = RefCell::new(Vec::new());
 }
 
-/// Allocate a new slot and return its index.
 fn store_alloc() -> usize {
     STORE.with_borrow_mut(|s| {
         s.push(AdderData::default());
@@ -88,39 +74,25 @@ fn store_alloc() -> usize {
     })
 }
 
-/// Read from a slot.
 fn store_get<R>(idx: usize, f: impl FnOnce(&AdderData) -> R) -> R {
     STORE.with_borrow(|s| f(&s[idx]))
 }
 
-/// Mutate a slot.
 fn store_set<R>(idx: usize, f: impl FnOnce(&mut AdderData) -> R) -> R {
     STORE.with_borrow_mut(|s| f(&mut s[idx]))
 }
 
 // ---------------------------------------------------------------------------
-// common::instance resource
+// co-simulation::co-simulation-instance resource
 // ---------------------------------------------------------------------------
 
-/// Internal state for a `common::instance` handle.
-pub struct AdderInstance {
-    /// Index into `STORE`.
+pub struct AdderCoSimInstance {
     idx: usize,
 }
 
-impl GuestInstance for AdderInstance {
-    // ── Static factory methods ──────────────────────────────────────────────
+impl GuestCoSimulationInstance for AdderCoSimInstance {
 
-    fn instantiate_model_exchange(
-        _instance_name:       String,
-        _instantiation_token: String,
-        _resource_path:       String,
-        _visible:             bool,
-        _logging_on:          bool,
-    ) -> Option<exports::fmi::fmi3::common::Instance> {
-        // This FMU only supports Co-Simulation.
-        None
-    }
+    // ── Static factory ───────────────────────────────────────────────────────
 
     fn instantiate_co_simulation(
         _instance_name:                   String,
@@ -131,20 +103,11 @@ impl GuestInstance for AdderInstance {
         _event_mode_used:                 bool,
         _early_return_allowed:            bool,
         _required_intermediate_variables: Vec<u32>,
-    ) -> Option<exports::fmi::fmi3::common::Instance> {
+    ) -> Option<exports::fmi::fmi3::co_simulation::CoSimulationInstance> {
         let idx = store_alloc();
-        Some(exports::fmi::fmi3::common::Instance::new(AdderInstance { idx }))
-    }
-
-    fn instantiate_scheduled_execution(
-        _instance_name:       String,
-        _instantiation_token: String,
-        _resource_path:       String,
-        _visible:             bool,
-        _logging_on:          bool,
-    ) -> Option<exports::fmi::fmi3::common::Instance> {
-        // This FMU only supports Co-Simulation.
-        None
+        Some(exports::fmi::fmi3::co_simulation::CoSimulationInstance::new(
+            AdderCoSimInstance { idx },
+        ))
     }
 
     // ── Debug logging ────────────────────────────────────────────────────────
@@ -169,7 +132,6 @@ impl GuestInstance for AdderInstance {
     }
 
     fn enter_event_mode(&self) -> Status {
-        // Event mode is not supported by this FMU.
         Status::Error
     }
 
@@ -197,7 +159,7 @@ impl GuestInstance for AdderInstance {
         Status::Error
     }
 
-    // ── Float64 getter / setter (the variables this FMU exposes) ────────────
+    // ── Float64 getter / setter ──────────────────────────────────────────────
 
     fn get_float64(&self, value_references: Vec<u32>) -> Result<Vec<f64>, Status> {
         store_get(self.idx, |d| {
@@ -226,43 +188,42 @@ impl GuestInstance for AdderInstance {
         })
     }
 
-    // ── All remaining typed getters – not supported ──────────────────────────
+    // ── All other typed getters – not supported ──────────────────────────────
 
-    fn get_float32(&self, _: Vec<u32>) -> Result<Vec<f32>,   Status> { Err(Status::Error) }
-    fn get_int8   (&self, _: Vec<u32>) -> Result<Vec<i8>,    Status> { Err(Status::Error) }
-    fn get_int16  (&self, _: Vec<u32>) -> Result<Vec<i16>,   Status> { Err(Status::Error) }
-    fn get_int32  (&self, _: Vec<u32>) -> Result<Vec<i32>,   Status> { Err(Status::Error) }
-    fn get_int64  (&self, _: Vec<u32>) -> Result<Vec<i64>,   Status> { Err(Status::Error) }
-    fn get_uint8  (&self, _: Vec<u32>) -> Result<Vec<u8>,    Status> { Err(Status::Error) }
-    fn get_uint16 (&self, _: Vec<u32>) -> Result<Vec<u16>,   Status> { Err(Status::Error) }
-    fn get_uint32 (&self, _: Vec<u32>) -> Result<Vec<u32>,   Status> { Err(Status::Error) }
-    fn get_uint64 (&self, _: Vec<u32>) -> Result<Vec<u64>,   Status> { Err(Status::Error) }
-    fn get_boolean(&self, _: Vec<u32>) -> Result<Vec<bool>,  Status> { Err(Status::Error) }
-    fn get_string (&self, _: Vec<u32>) -> Result<Vec<String>,Status> { Err(Status::Error) }
-    fn get_binary (&self, _: Vec<u32>) -> Result<Vec<Vec<u8>>, Status> { Err(Status::Error) }
-    fn get_clock  (&self, _: Vec<u32>) -> Result<Vec<bool>,  Status> { Err(Status::Error) }
+    fn get_float32(&self, _: Vec<u32>) -> Result<Vec<f32>,      Status> { Err(Status::Error) }
+    fn get_int8   (&self, _: Vec<u32>) -> Result<Vec<i8>,       Status> { Err(Status::Error) }
+    fn get_int16  (&self, _: Vec<u32>) -> Result<Vec<i16>,      Status> { Err(Status::Error) }
+    fn get_int32  (&self, _: Vec<u32>) -> Result<Vec<i32>,      Status> { Err(Status::Error) }
+    fn get_int64  (&self, _: Vec<u32>) -> Result<Vec<i64>,      Status> { Err(Status::Error) }
+    fn get_uint8  (&self, _: Vec<u32>) -> Result<Vec<u8>,       Status> { Err(Status::Error) }
+    fn get_uint16 (&self, _: Vec<u32>) -> Result<Vec<u16>,      Status> { Err(Status::Error) }
+    fn get_uint32 (&self, _: Vec<u32>) -> Result<Vec<u32>,      Status> { Err(Status::Error) }
+    fn get_uint64 (&self, _: Vec<u32>) -> Result<Vec<u64>,      Status> { Err(Status::Error) }
+    fn get_boolean(&self, _: Vec<u32>) -> Result<Vec<bool>,     Status> { Err(Status::Error) }
+    fn get_string (&self, _: Vec<u32>) -> Result<Vec<String>,   Status> { Err(Status::Error) }
+    fn get_binary (&self, _: Vec<u32>) -> Result<Vec<Vec<u8>>,  Status> { Err(Status::Error) }
+    fn get_clock  (&self, _: Vec<u32>) -> Result<Vec<bool>,     Status> { Err(Status::Error) }
 
-    // ── All remaining typed setters – not supported ──────────────────────────
+    // ── All other typed setters – not supported ──────────────────────────────
 
-    fn set_float32(&self, _: Vec<u32>, _: Vec<f32>)    -> Status { Status::Error }
-    fn set_int8   (&self, _: Vec<u32>, _: Vec<i8>)     -> Status { Status::Error }
-    fn set_int16  (&self, _: Vec<u32>, _: Vec<i16>)    -> Status { Status::Error }
-    fn set_int32  (&self, _: Vec<u32>, _: Vec<i32>)    -> Status { Status::Error }
-    fn set_int64  (&self, _: Vec<u32>, _: Vec<i64>)    -> Status { Status::Error }
-    fn set_uint8  (&self, _: Vec<u32>, _: Vec<u8>)     -> Status { Status::Error }
-    fn set_uint16 (&self, _: Vec<u32>, _: Vec<u16>)    -> Status { Status::Error }
-    fn set_uint32 (&self, _: Vec<u32>, _: Vec<u32>)    -> Status { Status::Error }
-    fn set_uint64 (&self, _: Vec<u32>, _: Vec<u64>)    -> Status { Status::Error }
-    fn set_boolean(&self, _: Vec<u32>, _: Vec<bool>)   -> Status { Status::Error }
-    fn set_string (&self, _: Vec<u32>, _: Vec<String>) -> Status { Status::Error }
+    fn set_float32(&self, _: Vec<u32>, _: Vec<f32>)     -> Status { Status::Error }
+    fn set_int8   (&self, _: Vec<u32>, _: Vec<i8>)      -> Status { Status::Error }
+    fn set_int16  (&self, _: Vec<u32>, _: Vec<i16>)     -> Status { Status::Error }
+    fn set_int32  (&self, _: Vec<u32>, _: Vec<i32>)     -> Status { Status::Error }
+    fn set_int64  (&self, _: Vec<u32>, _: Vec<i64>)     -> Status { Status::Error }
+    fn set_uint8  (&self, _: Vec<u32>, _: Vec<u8>)      -> Status { Status::Error }
+    fn set_uint16 (&self, _: Vec<u32>, _: Vec<u16>)     -> Status { Status::Error }
+    fn set_uint32 (&self, _: Vec<u32>, _: Vec<u32>)     -> Status { Status::Error }
+    fn set_uint64 (&self, _: Vec<u32>, _: Vec<u64>)     -> Status { Status::Error }
+    fn set_boolean(&self, _: Vec<u32>, _: Vec<bool>)    -> Status { Status::Error }
+    fn set_string (&self, _: Vec<u32>, _: Vec<String>)  -> Status { Status::Error }
     fn set_binary (&self, _: Vec<u32>, _: Vec<Vec<u8>>) -> Status { Status::Error }
-    fn set_clock  (&self, _: Vec<u32>, _: Vec<bool>)   -> Status { Status::Error }
+    fn set_clock  (&self, _: Vec<u32>, _: Vec<bool>)    -> Status { Status::Error }
 
     // ── Variable dependencies ────────────────────────────────────────────────
 
     fn get_number_of_variable_dependencies(&self, vr: u32) -> Result<u64, Status> {
         match vr {
-            // sum depends on input_a and input_b
             VR_OUTPUT_SUM => Ok(2),
             _             => Err(Status::Error),
         }
@@ -318,9 +279,6 @@ impl GuestInstance for AdderInstance {
     }
 
     // ── Directional / adjoint derivatives ───────────────────────────────────
-    //
-    // The Jacobian of sum = input_a + input_b is the all-ones row vector,
-    // so the directional derivative equals the sum of the seed entries.
 
     fn get_directional_derivative(
         &self,
@@ -328,11 +286,9 @@ impl GuestInstance for AdderInstance {
         knowns:   Vec<u32>,
         seed:     Vec<f64>,
     ) -> Result<Vec<f64>, Status> {
-        // Only the single scalar output (VR_OUTPUT_SUM) is supported.
         if unknowns != [VR_OUTPUT_SUM] {
             return Err(Status::Error);
         }
-        // seed[i] corresponds to knowns[i]; dSum/dInput = 1 for both inputs.
         let sensitivity: f64 = knowns
             .iter()
             .zip(seed.iter())
@@ -350,95 +306,60 @@ impl GuestInstance for AdderInstance {
         knowns:   Vec<u32>,
         seed:     Vec<f64>,
     ) -> Result<Vec<f64>, Status> {
-        // Adjoint of sum wrt inputs: Δinput = seed[0] for both inputs.
         if unknowns != [VR_OUTPUT_SUM] {
             return Err(Status::Error);
         }
-        let output_seed = seed.first().copied().unwrap_or(0.0);
-        let result: Result<Vec<f64>, Status> = knowns
+        // Jᵀ · seed: for sum = a + b the transpose Jacobian is a column of
+        // ones, so each output sensitivity equals the single seed entry.
+        let s = seed.first().copied().unwrap_or(0.0);
+        let sensitivity: Vec<f64> = knowns
             .iter()
             .map(|vr| match *vr {
-                VR_INPUT_A | VR_INPUT_B => Ok(output_seed),
-                _                       => Err(Status::Error),
+                VR_INPUT_A | VR_INPUT_B => s,
+                _                       => 0.0,
             })
             .collect();
-        result
+        Ok(sensitivity)
     }
 
-    // ── Clock / interval queries – not supported ─────────────────────────────
+    // ── Clock interval / shift queries – not applicable ──────────────────────
 
-    fn get_interval_decimal(&self, _: Vec<u32>)
-        -> Result<Vec<(f64, IntervalQualifier)>, Status> { Err(Status::Error) }
-
-    fn get_interval_fraction(&self, _: Vec<u32>)
-        -> Result<Vec<(IntervalFraction, IntervalQualifier)>, Status> { Err(Status::Error) }
-
+    fn get_interval_decimal(&self, _: Vec<u32>) -> Result<Vec<(f64, IntervalQualifier)>, Status> {
+        Err(Status::Error)
+    }
+    fn get_interval_fraction(&self, _: Vec<u32>) -> Result<Vec<(IntervalFraction, IntervalQualifier)>, Status> {
+        Err(Status::Error)
+    }
     fn get_shift_decimal(&self, _: Vec<u32>) -> Result<Vec<f64>, Status> {
         Err(Status::Error)
     }
-
     fn get_shift_fraction(&self, _: Vec<u32>) -> Result<Vec<IntervalFraction>, Status> {
         Err(Status::Error)
     }
-
-    fn set_interval_decimal(&self, _: Vec<u32>, _: Vec<f64>) -> Status { Status::Error }
-
-    fn set_interval_fraction(
-        &self, _: Vec<u32>, _: Vec<IntervalFraction>,
-    ) -> Status { Status::Error }
-
-    fn set_shift_decimal(&self, _: Vec<u32>, _: Vec<f64>) -> Status { Status::Error }
-
-    fn set_shift_fraction(
-        &self, _: Vec<u32>, _: Vec<IntervalFraction>,
-    ) -> Status { Status::Error }
-
-    fn evaluate_discrete_states(&self) -> Status { Status::Error }
-}
-
-// ---------------------------------------------------------------------------
-// co-simulation::co-simulation-instance resource
-// ---------------------------------------------------------------------------
-
-/// Internal state for a `co-simulation::co-simulation-instance` handle.
-///
-/// Shares the same `STORE` slot as the originating `AdderInstance` via the
-/// stored `idx`.  The `AdderInstance` is consumed by `from-instance` and its
-/// slot index is transferred here.
-pub struct AdderCoSimInstance {
-    /// Index into `STORE` – same slot as the originating `AdderInstance`.
-    idx: usize,
-}
-
-impl GuestCoSimulationInstance for AdderCoSimInstance {
-    /// Wrap the common `instance` into a co-simulation handle.
-    ///
-    /// `inst` is consumed (owned transfer in WIT).  The STORE slot it
-    /// referenced continues to hold the simulation state and is now owned by
-    /// this `AdderCoSimInstance`.
-    fn from_instance(
-        inst: exports::fmi::fmi3::common::Instance,
-    ) -> exports::fmi::fmi3::co_simulation::CoSimulationInstance {
-        let idx = inst.get::<AdderInstance>().idx;
-        // `inst` is dropped here but the STORE entry at `idx` is intentionally
-        // kept alive (no Drop impl removes it).
-        exports::fmi::fmi3::co_simulation::CoSimulationInstance::new(AdderCoSimInstance { idx })
+    fn set_interval_decimal(&self, _: Vec<u32>, _: Vec<f64>) -> Status {
+        Status::Error
+    }
+    fn set_interval_fraction(&self, _: Vec<u32>, _: Vec<IntervalFraction>) -> Status {
+        Status::Error
+    }
+    fn set_shift_decimal(&self, _: Vec<u32>, _: Vec<f64>) -> Status {
+        Status::Error
+    }
+    fn set_shift_fraction(&self, _: Vec<u32>, _: Vec<IntervalFraction>) -> Status {
+        Status::Error
+    }
+    fn evaluate_discrete_states(&self) -> Status {
+        Status::Error
     }
 
-    // ── Stepped simulation ───────────────────────────────────────────────────
+    // ── Co-simulation-specific methods ──────────────────────────────────────
 
-    /// Advance the simulation by one communication step.
-    ///
-    /// The adder is a purely algebraic, memoryless component: the output
-    /// `sum = input_a + input_b` is valid at any point in time and requires
-    /// no integration.  `do-step` therefore simply acknowledges the step.
     fn do_step(
         &self,
         current_communication_point:             f64,
         communication_step_size:                 f64,
         _no_set_fmu_state_prior_to_current_point: bool,
     ) -> Result<DoStepResult, Status> {
-        let _ = self.idx;
         Ok(DoStepResult {
             last_successful_time:  current_communication_point + communication_step_size,
             event_handling_needed: false,
@@ -447,14 +368,11 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
         })
     }
 
-    // ── Input / output derivatives – not meaningful for an algebraic FMU ────
-
     fn set_input_derivatives(
         &self,
         _requests: Vec<(u32, u32)>,
         _values:   Vec<f64>,
     ) -> Status {
-        // Higher-order derivatives are not used by this memoryless FMU.
         Status::Ok
     }
 
@@ -462,7 +380,6 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
         &self,
         _requests: Vec<(u32, u32)>,
     ) -> Result<Vec<f64>, Status> {
-        // No continuous dynamics; output derivatives are not provided.
         Err(Status::Error)
     }
 
@@ -478,19 +395,13 @@ impl GuestCoSimulationInstance for AdderCoSimInstance {
 struct AdderFmu;
 
 impl CommonGuest for AdderFmu {
-    type Instance             = AdderInstance;
-
-    // ── Version ─────────────────────────────────────────────────────────────
-
     fn get_version() -> String {
         "3.0".to_string()
     }
-
 }
 
 impl CoSimulationGuest for AdderFmu {
     type CoSimulationInstance = AdderCoSimInstance;
-
 }
 
 export!(AdderFmu);
