@@ -29,4 +29,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: runners
-          path: build/adder-fmu-c-runner-build/adder-fmu-c-runner
+          path: |
+            build/adder-fmu-c-runner-build/adder-fmu-c-runner
+            build/adder-fmu-rust-runner-build/adder-fmu-rust-runner

@@ -211,24 +211,41 @@ if(CARGO_EXECUTABLE)
     # checking that sum = input_a + input_b at each communication point.
     # -----------------------------------------------------------------------
     set(ADDER_FMU_RUST_RUNNER_DIR  "${CMAKE_SOURCE_DIR}/examples/adder-fmu-rust-runner")
+    set(ADDER_FMU_RUST_RUNNER_BUILD_DIR "${CMAKE_BINARY_DIR}/adder-fmu-rust-runner-build")
+    set(ADDER_FMU_RUST_RUNNER_NATIVE_BIN "${ADDER_FMU_RUST_RUNNER_DIR}/target/debug/adder-fmu-rust-runner${CMAKE_EXECUTABLE_SUFFIX}")
+    set(ADDER_FMU_RUST_RUNNER_BIN "${ADDER_FMU_RUST_RUNNER_BUILD_DIR}/adder-fmu-rust-runner${CMAKE_EXECUTABLE_SUFFIX}")
 
-    add_custom_target(adder-fmu-rust-runner
-        COMMAND ${CARGO_EXECUTABLE} run --manifest-path "${ADDER_FMU_RUST_RUNNER_DIR}/Cargo.toml"
-                -- "${ADDER_RUST_FMU_ARCHIVE}"
+    add_custom_command(
+        OUTPUT "${ADDER_FMU_RUST_RUNNER_BIN}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${ADDER_FMU_RUST_RUNNER_BUILD_DIR}"
+        COMMAND ${CARGO_EXECUTABLE} build --manifest-path "${ADDER_FMU_RUST_RUNNER_DIR}/Cargo.toml"
+        COMMAND ${CMAKE_COMMAND} -E copy "${ADDER_FMU_RUST_RUNNER_NATIVE_BIN}" "${ADDER_FMU_RUST_RUNNER_BIN}"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
         DEPENDS
-            adder-rust-fmu-archive
             "${ADDER_FMU_RUST_RUNNER_DIR}/Cargo.toml"
             "${ADDER_FMU_RUST_RUNNER_DIR}/src/main.rs"
             ${WIT_FILES}
+        COMMENT "Building adder-fmu-rust-runner standalone executable..."
+        VERBATIM
+    )
+
+    add_custom_target(adder-fmu-rust-runner-build
+        DEPENDS "${ADDER_FMU_RUST_RUNNER_BIN}"
+    )
+
+    add_custom_target(adder-fmu-rust-runner
+        COMMAND "${ADDER_FMU_RUST_RUNNER_BIN}" "${ADDER_RUST_FMU_ARCHIVE}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        DEPENDS
+            adder-fmu-rust-runner-build
+            adder-rust-fmu-archive
         COMMENT "Running adder-fmu-rust-runner against adder-rust-fmu.fmu..."
         VERBATIM
     )
 
     add_test(
         NAME adder-fmu-rust-runner
-        COMMAND ${CARGO_EXECUTABLE} run --manifest-path "${ADDER_FMU_RUST_RUNNER_DIR}/Cargo.toml"
-                -- "${ADDER_RUST_FMU_ARCHIVE}"
+        COMMAND "${ADDER_FMU_RUST_RUNNER_BIN}" "${ADDER_RUST_FMU_ARCHIVE}"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     )
     set_tests_properties(adder-fmu-rust-runner
