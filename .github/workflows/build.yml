@@ -5,6 +5,10 @@ on:
     branches: ["main"]
   pull_request:
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -12,9 +16,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build with devcontainer
         uses: devcontainers/ci@v0.3
         with:
+          imageName: ghcr.io/pmsfit/fmi3-wasm-devcontainer
+          cacheFrom: ghcr.io/pmsfit/fmi3-wasm-devcontainer
+          push: always
           runCmd: |
             cmake --preset wasm
             cmake --build --preset wasm --target run-all-examples
