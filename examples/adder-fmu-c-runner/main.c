@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -15,8 +16,15 @@
 
 #include <wasmtime.h>
 
+#include "../fmi-standard/headers/fmi3FunctionTypes.h"
+
 static const char *WORLD_COSIM = "fmi:fmi3/co-simulation@3.0.0";
-static const char *TARGET_PLATFORM = "wasm32-wasip2";
+static const char *WASM_TARGET_PLATFORM = "wasm32-wasip2";
+
+typedef enum {
+    RUN_TARGET_WASM,
+    RUN_TARGET_NATIVE,
+} run_target_t;
 
 typedef struct {
     char model_identifier[256];
@@ -26,8 +34,45 @@ typedef struct {
     uint32_t vr_sum;
 } fmu_metadata_t;
 
+typedef struct {
+    fmi3InstantiateCoSimulationTYPE *instantiate_co_simulation;
+    fmi3FreeInstanceTYPE *free_instance;
+    fmi3EnterInitializationModeTYPE *enter_initialization_mode;
+    fmi3ExitInitializationModeTYPE *exit_initialization_mode;
+    fmi3SetFloat64TYPE *set_float64;
+    fmi3DoStepTYPE *do_step;
+    fmi3GetFloat64TYPE *get_float64;
+    fmi3TerminateTYPE *terminate;
+} fmi3_native_api_t;
+
 static void print_usage(const char *argv0) {
-    fprintf(stderr, "Usage: %s <path/to/adder-fmu.fmu>\n", argv0);
+    fprintf(stderr, "Usage: %s [--native|-n] <path/to/adder-fmu.fmu>\n", argv0);
+}
+
+static bool parse_args(int argc, char **argv, bool *prefer_native_out, const char **fmu_path_out) {
+    *prefer_native_out = false;
+    *fmu_path_out = NULL;
+
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--native") == 0 || strcmp(argv[i], "-n") == 0) {
+            *prefer_native_out = true;
+            continue;
+        }
+
+        if (argv[i][0] == '-') {
+            fprintf(stderr, "Unknown option: %s\n", argv[i]);
+            return false;
+        }
+
+        if (*fmu_path_out != NULL) {
+            fprintf(stderr, "Unexpected extra argument: %s\n", argv[i]);
+            return false;
+        }
+
+        *fmu_path_out = argv[i];
+    }
+
+    return *fmu_path_out != NULL;
 }
 
 static void print_wasmtime_error(const char *context, wasmtime_error_t *error) {
@@ -310,27 +355,262 @@ static bool find_wasm_in_fmu(const char *fmu_dir,
                              char *wasm_path_out,
                              size_t wasm_path_out_len) {
     char wasm_dir[4096];
-    snprintf(wasm_dir, sizeof(wasm_dir), "%s/binaries/%s", fmu_dir, TARGET_PLATFORM);
+    snprintf(wasm_dir, sizeof(wasm_dir), "%s/binaries/%s", fmu_dir, WASM_TARGET_PLATFORM);
 
     struct stat st;
     if (stat(wasm_dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
-        fprintf(stderr, "Missing directory: %s\n", wasm_dir);
         return false;
     }
 
     int written = snprintf(wasm_path_out, wasm_path_out_len, "%s/%s.wasm", wasm_dir,
                            metadata->model_identifier);
     if (written < 0 || (size_t)written >= wasm_path_out_len) {
-        fprintf(stderr, "Wasm path too long for modelIdentifier '%s'\n", metadata->model_identifier);
         return false;
     }
 
     if (access(wasm_path_out, R_OK) != 0) {
-        fprintf(stderr, "Missing wasm component: %s\n", wasm_path_out);
         return false;
     }
 
     return true;
+}
+
+static bool find_native_in_fmu(const char *fmu_dir,
+                               const fmu_metadata_t *metadata,
+                               char *native_path_out,
+                               size_t native_path_out_len,
+                               char *native_platform_out,
+                               size_t native_platform_out_len) {
+    const char *native_platform = "x86_64-linux";
+    const char *native_ext = ".so";
+
+    int path_written = snprintf(native_path_out, native_path_out_len,
+                                "%s/binaries/%s/%s%s",
+                                fmu_dir,
+                                native_platform,
+                                metadata->model_identifier,
+                                native_ext);
+    if (path_written < 0 || (size_t)path_written >= native_path_out_len) {
+        return false;
+    }
+
+    if (access(native_path_out, R_OK) != 0) {
+        return false;
+    }
+
+    int platform_written = snprintf(native_platform_out, native_platform_out_len, "%s", native_platform);
+    if (platform_written < 0 || (size_t)platform_written >= native_platform_out_len) {
+        return false;
+    }
+
+    return true;
+}
+
+static const char *fmi3_status_name(fmi3Status status) {
+    switch (status) {
+        case fmi3OK:
+            return "OK";
+        case fmi3Warning:
+            return "Warning";
+        case fmi3Discard:
+            return "Discard";
+        case fmi3Error:
+            return "Error";
+        case fmi3Fatal:
+            return "Fatal";
+        default:
+            return "Unknown";
+    }
+}
+
+static void native_log_message(fmi3InstanceEnvironment instance_environment,
+                               fmi3Status status,
+                               fmi3String category,
+                               fmi3String message) {
+    (void)instance_environment;
+    fprintf(stderr, "[fmu-native][%s][%s] %s\n",
+            fmi3_status_name(status),
+            category != NULL ? category : "",
+            message != NULL ? message : "");
+}
+
+static void native_intermediate_update(fmi3InstanceEnvironment instance_environment,
+                                       fmi3Float64 intermediate_update_time,
+                                       fmi3Boolean intermediate_variable_set_requested,
+                                       fmi3Boolean intermediate_variable_get_allowed,
+                                       fmi3Boolean intermediate_step_finished,
+                                       fmi3Boolean can_return_early,
+                                       fmi3Boolean *early_return_requested,
+                                       fmi3Float64 *early_return_time) {
+    (void)instance_environment;
+    (void)intermediate_update_time;
+    (void)intermediate_variable_set_requested;
+    (void)intermediate_variable_get_allowed;
+    (void)intermediate_step_finished;
+    (void)can_return_early;
+    if (early_return_requested != NULL) {
+        *early_return_requested = fmi3False;
+    }
+    if (early_return_time != NULL) {
+        *early_return_time = 0.0;
+    }
+}
+
+static bool load_symbol(void *lib, const char *symbol_name, void **symbol_out) {
+    dlerror();
+    void *symbol = dlsym(lib, symbol_name);
+    const char *error = dlerror();
+    if (error != NULL || symbol == NULL) {
+        fprintf(stderr, "Missing symbol '%s': %s\n", symbol_name, error != NULL ? error : "unknown error");
+        return false;
+    }
+    *symbol_out = symbol;
+    return true;
+}
+
+static bool load_native_api(void *lib, fmi3_native_api_t *api) {
+    return load_symbol(lib, "fmi3InstantiateCoSimulation", (void **)&api->instantiate_co_simulation) &&
+           load_symbol(lib, "fmi3FreeInstance", (void **)&api->free_instance) &&
+           load_symbol(lib, "fmi3EnterInitializationMode", (void **)&api->enter_initialization_mode) &&
+           load_symbol(lib, "fmi3ExitInitializationMode", (void **)&api->exit_initialization_mode) &&
+           load_symbol(lib, "fmi3SetFloat64", (void **)&api->set_float64) &&
+           load_symbol(lib, "fmi3DoStep", (void **)&api->do_step) &&
+           load_symbol(lib, "fmi3GetFloat64", (void **)&api->get_float64) &&
+           load_symbol(lib, "fmi3Terminate", (void **)&api->terminate);
+}
+
+static bool run_native_fmu(const char *native_path, const fmu_metadata_t *metadata) {
+    const double step_size = 0.1;
+    const size_t n_steps = 50;
+    const double tolerance = 1e-10;
+    bool ok = false;
+
+    void *lib = dlopen(native_path, RTLD_NOW | RTLD_LOCAL);
+    if (lib == NULL) {
+        fprintf(stderr, "Failed to load native FMU binary: %s\n", dlerror());
+        return false;
+    }
+
+    fmi3_native_api_t api;
+    memset(&api, 0, sizeof(api));
+    if (!load_native_api(lib, &api)) {
+        dlclose(lib);
+        return false;
+    }
+
+    fmi3Instance cs_instance = api.instantiate_co_simulation(
+        "adder-1", "", "", fmi3False, fmi3False, fmi3False, fmi3False,
+        NULL, 0, NULL, native_log_message, native_intermediate_update);
+    if (cs_instance == NULL) {
+        fprintf(stderr, "fmi3InstantiateCoSimulation returned NULL\n");
+        dlclose(lib);
+        return false;
+    }
+
+    if (api.enter_initialization_mode(cs_instance, fmi3False, 0.0, 0.0, fmi3False, 0.0) != fmi3OK) {
+        fprintf(stderr, "fmi3EnterInitializationMode failed\n");
+        goto cleanup;
+    }
+
+    {
+        const fmi3ValueReference vrs[] = {metadata->vr_input_a, metadata->vr_input_b};
+        const fmi3Float64 values[] = {0.0, 2.0};
+        if (api.set_float64(cs_instance, vrs, 2, values, 2) != fmi3OK) {
+            fprintf(stderr, "fmi3SetFloat64 during initialization failed\n");
+            goto cleanup;
+        }
+    }
+
+    if (api.exit_initialization_mode(cs_instance) != fmi3OK) {
+        fprintf(stderr, "fmi3ExitInitializationMode failed\n");
+        goto cleanup;
+    }
+
+    printf("Running adder-fmu from t=0.0 to t=%.1f s in %.1f s steps...\n", n_steps * step_size,
+           step_size);
+
+    for (size_t i = 0; i < n_steps; ++i) {
+        double t = (double)i * step_size;
+        double input_a = t;
+        double input_b = 2.0 + 2.0 * t;
+
+        {
+            const fmi3ValueReference vrs[] = {metadata->vr_input_a, metadata->vr_input_b};
+            const fmi3Float64 values[] = {input_a, input_b};
+            fmi3Status set_status = api.set_float64(cs_instance, vrs, 2, values, 2);
+            if (set_status != fmi3OK) {
+                fprintf(stderr, "fmi3SetFloat64 failed at step %zu (status=%s)\n",
+                        i, fmi3_status_name(set_status));
+                goto cleanup;
+            }
+        }
+
+        {
+            fmi3Boolean event_handling_needed = fmi3False;
+            fmi3Boolean terminate_simulation = fmi3False;
+            fmi3Boolean early_return = fmi3False;
+            fmi3Float64 last_successful_time = 0.0;
+
+            fmi3Status step_status = api.do_step(cs_instance,
+                                                 t,
+                                                 step_size,
+                                                 fmi3False,
+                                                 &event_handling_needed,
+                                                 &terminate_simulation,
+                                                 &early_return,
+                                                 &last_successful_time);
+            if (step_status != fmi3OK) {
+                fprintf(stderr, "fmi3DoStep failed at step %zu (status=%s)\n",
+                        i, fmi3_status_name(step_status));
+                goto cleanup;
+            }
+
+            double expected_time = t + step_size;
+            if (fabs(last_successful_time - expected_time) > tolerance ||
+                terminate_simulation ||
+                early_return ||
+                event_handling_needed) {
+                fprintf(stderr,
+                        "fmi3DoStep validation failed at step %zu: last=%.17g expected=%.17g event=%d terminate=%d early=%d\n",
+                        i, last_successful_time, expected_time, (int)event_handling_needed,
+                        (int)terminate_simulation, (int)early_return);
+                goto cleanup;
+            }
+        }
+
+        {
+            const fmi3ValueReference vrs[] = {metadata->vr_time, metadata->vr_sum};
+            fmi3Float64 values[2] = {0.0, 0.0};
+            fmi3Status get_status = api.get_float64(cs_instance, vrs, 2, values, 2);
+            if (get_status != fmi3OK) {
+                fprintf(stderr, "fmi3GetFloat64 failed at step %zu (status=%s)\n",
+                        i, fmi3_status_name(get_status));
+                goto cleanup;
+            }
+
+            double expected_time = t + step_size;
+            double expected_sum = input_a + input_b;
+            if (fabs(values[0] - expected_time) > tolerance || fabs(values[1] - expected_sum) > tolerance) {
+                fprintf(stderr,
+                        "value check failed at step %zu: time=%.17g expected=%.17g sum=%.17g expected=%.17g\n",
+                        i, values[0], expected_time, values[1], expected_sum);
+                goto cleanup;
+            }
+        }
+    }
+
+    if (api.terminate(cs_instance) != fmi3OK) {
+        fprintf(stderr, "fmi3Terminate failed\n");
+        goto cleanup;
+    }
+
+    printf("OK - all %zu steps passed: adder FMU correctly computes sum = input_a + input_b.\n", n_steps);
+    ok = true;
+
+cleanup:
+    api.free_instance(cs_instance);
+    dlclose(lib);
+    return ok;
 }
 
 static bool read_binary_file(const char *path, uint8_t **data_out, size_t *len_out) {
@@ -563,14 +843,17 @@ static bool parse_get_float64_result(const wasmtime_component_val_t *result_val,
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2) {
+    bool prefer_native = false;
+    const char *fmu_path = NULL;
+    if (!parse_args(argc, argv, &prefer_native, &fmu_path)) {
         print_usage(argv[0]);
         return 2;
     }
 
-    const char *fmu_path = argv[1];
     char tmp_dir[128];
     char wasm_path[4096];
+    char native_path[4096];
+    char native_platform[256];
     fmu_metadata_t metadata;
     memset(&metadata, 0, sizeof(metadata));
 
@@ -584,12 +867,44 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if (!find_wasm_in_fmu(tmp_dir, &metadata, wasm_path, sizeof(wasm_path))) {
-        fprintf(stderr, "No wasm binary found under %s/binaries/%s\n", tmp_dir, TARGET_PLATFORM);
+    bool has_wasm = find_wasm_in_fmu(tmp_dir, &metadata, wasm_path, sizeof(wasm_path));
+    bool has_native = find_native_in_fmu(tmp_dir, &metadata, native_path, sizeof(native_path),
+                                         native_platform, sizeof(native_platform));
+
+    run_target_t target;
+    if (prefer_native) {
+        if (has_native) {
+            target = RUN_TARGET_NATIVE;
+        } else {
+            fprintf(stderr, "Native target requested but no native binary was found in FMU.\n");
+            return 1;
+        }
+    } else if (has_wasm) {
+        target = RUN_TARGET_WASM;
+    } else if (has_native) {
+        target = RUN_TARGET_NATIVE;
+    } else {
+        fprintf(stderr, "No runnable target found in FMU.\n");
+        fprintf(stderr, "Checked for wasm target under %s/binaries/%s and native binaries under %s/binaries/*.\n",
+                tmp_dir, WASM_TARGET_PLATFORM, tmp_dir);
         return 1;
     }
 
     printf("Extracted FMU to '%s'\n", tmp_dir);
+
+    if (target == RUN_TARGET_NATIVE && !has_wasm) {
+        printf("Selected target: native (%s) (wasm target unavailable)\n", native_platform);
+    } else if (target == RUN_TARGET_NATIVE) {
+        printf("Selected target: native (%s) (requested via --native)\n", native_platform);
+    } else {
+        printf("Selected target: wasm (%s)\n", WASM_TARGET_PLATFORM);
+    }
+
+    if (target == RUN_TARGET_NATIVE) {
+        printf("Loading native FMU binary: '%s'\n", native_path);
+        return run_native_fmu(native_path, &metadata) ? 0 : 1;
+    }
+
     printf("Loading wasm component: '%s'\n", wasm_path);
 
     uint8_t *wasm_bytes = NULL;
