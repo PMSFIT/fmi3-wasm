@@ -4,17 +4,27 @@
 
 WIT definitions that map the [FMI 3.0](https://svn.modelica.org/fmi/branches/public/specifications/v3.0/) C API to the [WebAssembly Component Model](https://component-model.bytecodealliance.org/) interface description language (WIT).
 
+Also included are examples show-casing the WIT definitions, using Rust,
+C and WAT implementations.
+
 ## File layout
 
 ```
 wit/
-├── fmi3-types.wit              # Primitive types, enums, records
-├── fmi3-callbacks.wit          # Environment → FMU callbacks
-├── fmi3-common.wit             # get-version free function only
-├── fmi3-model-exchange.wit     # Standalone ME instance resource + all methods
-├── fmi3-co-simulation.wit      # Standalone CS instance resource + all methods
-├── fmi3-scheduled-execution.wit# Standalone SE instance resource + all methods
-└── world.wit                   # Composed worlds for each FMU kind
+├── fmi3-types.wit                  # Primitive types, enums, records
+├── fmi3-callbacks.wit              # Environment → FMU callbacks
+├── fmi3-common.wit                 # get-version free function only
+├── fmi3-model-exchange.wit         # Standalone ME instance resource + all methods
+├── fmi3-co-simulation.wit          # Standalone CS instance resource + all methods
+├── fmi3-scheduled-execution.wit    # Standalone SE instance resource + all methods
+└── world.wit                       # Composed worlds for each FMU kind
+examples/
+├── adder-rust-fmu                  # Rust sample FMU
+├── adder-c-fmu                     # Native C sample FMU, including wasm and native targets
+├── adder-wat-fmu                   # WAT sample FMU
+├── adder-fmu-rust-runner           # Rust FMU import demonstration
+├── adder-fmu-c-runner              # Native C FMU import demonstration for both wasm and native targets
+└── fmi-standard                    # Sub-module for the required FMI 3.0 headers for native targets
 ```
 
 ## Quick validation
@@ -24,6 +34,27 @@ wit/
 wasm-tools component wit wit/
 ```
 
+## Example targets
+
+```sh
+# Configure build
+cmake --preset wasm
+
+# Build and run all buildabe examples
+cmake --build build --target run-all-examples
+
+# Build and validate just the WAT FMU example
+cmake --build build --target adder-wat-fmu
+cmake --build build --target validate-adder-wat-fmu
+
+# Package the wat example as an FMU archive
+cmake --build build --target adder-wat-fmu-archive
+
+# Run both host runners against adder-wat-fmu.fmu
+cmake --build build --target adder-wat-fmu-rust-runner
+cmake --build build --target adder-wat-fmu-c-runner
+```
+
 ## Design decisions
 
 ### `fmi3Instance` → three standalone resources
@@ -31,7 +62,7 @@ wasm-tools component wit wit/
 The opaque C pointer is mapped to three distinct WIT resources — one per
 interface kind:
 
-| FMU kind           | WIT resource                    | Static factory                     |
+| FMU kind           | WIT resource                     | Static factory                      |
 |--------------------|----------------------------------|-------------------------------------|
 | Model Exchange     | `model-exchange-instance`        | `instantiate-model-exchange`        |
 | Co-Simulation      | `co-simulation-instance`         | `instantiate-co-simulation`         |
